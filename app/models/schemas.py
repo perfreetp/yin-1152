@@ -111,3 +111,26 @@ class RiskJob:
     issues: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+@dataclass
+class FollowUp:
+    id: Optional[int] = None
+    job_id: Optional[int] = None
+    follow_time: Optional[datetime] = None
+    owner: str = ""
+    action: str = ""
+    review_date: Optional[date] = None
+    result: str = ""
+    confirmed: bool = False
+    confirmed_by: str = ""
+    confirmed_at: Optional[datetime] = None
+
+
+@dataclass
+class RecentProject:
+    id: Optional[int] = None
+    project_id: Optional[int] = None
+    last_viewed_at: Optional[datetime] = None
+    pinned: bool = False
+    view_count: int = 0

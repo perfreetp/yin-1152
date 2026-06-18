@@ -1,14 +1,15 @@
 from datetime import date
-from typing import Optional
+from typing import Optional, List
 
-from PySide6.QtCore import Qt, QDate, Signal
+from PySide6.QtCore import Qt, QDate, Signal, QSize
 from PySide6.QtWidgets import (
     QWidget, QLabel, QComboBox, QDateEdit, QPushButton, QVBoxLayout,
-    QHBoxLayout, QGroupBox, QListWidget, QListWidgetItem, QFrame, QMessageBox
+    QHBoxLayout, QGroupBox, QListWidget, QListWidgetItem, QFrame, QMessageBox,
+    QToolButton, QScrollArea, QMenu, QSizePolicy
 )
 
 from app.db.database import Database
-from app.models.schemas import ContractProject, WORK_TYPES, RISK_LEVELS, JOB_STATUSES
+from app.models.schemas import ContractProject, WORK_TYPES, RISK_LEVELS, JOB_STATUSES, RecentProject
 from app.views.risk_entry import RiskEntryWindow
 from app.views.daily_report import DailyReportWindow
 from app.views.personnel_qualification import PersonnelQualificationWindow
@@ -53,6 +54,8 @@ class ProjectSelectionWindow(QWidget):
         sub.setStyleSheet("font-size: 13px; color: #7f8c8d;")
         sub.setAlignment(Qt.AlignCenter)
         layout.addWidget(sub)
+
+        self._build_recent_projects(layout)
 
         filter_box = QGroupBox("筛选条件")
         filter_box.setStyleSheet("""
@@ -218,6 +221,179 @@ class ProjectSelectionWindow(QWidget):
         layout.addLayout(content, 1)
 
         self._update_buttons_state()
+        self._refresh_recent_projects()
+
+    def _build_recent_projects(self, parent_layout: QVBoxLayout):
+        box = QGroupBox("⭐ 常用 / 最近项目（一键直达）")
+        box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; font-size: 13px;
+                border: 1px dashed #f39c12; border-radius: 8px;
+                margin-top: 6px; padding: 10px 10px 10px 10px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #d35400; }
+        """)
+        box_v = QVBoxLayout(box)
+        box_v.setContentsMargins(6, 8, 6, 6)
+        box_v.setSpacing(6)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setMaximumHeight(78)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        self.recent_container = QWidget()
+        self.recent_layout = QHBoxLayout(self.recent_container)
+        self.recent_layout.setContentsMargins(2, 2, 2, 2)
+        self.recent_layout.setSpacing(8)
+        self.recent_layout.addStretch(1)
+
+        self.lbl_recent_empty = QLabel("暂无记录——查看任意项目后会自动出现在这里。右键卡片可置顶为常用项目。")
+        self.lbl_recent_empty.setStyleSheet("color: #95a5a6; font-size: 11px; padding: 8px;")
+        self.lbl_recent_empty.setAlignment(Qt.AlignCenter)
+        self.recent_layout.insertWidget(0, self.lbl_recent_empty)
+
+        scroll.setWidget(self.recent_container)
+        box_v.addWidget(scroll)
+
+        parent_layout.addWidget(box)
+
+    def _refresh_recent_projects(self):
+        while self.recent_layout.count() > 1:
+            item = self.recent_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        recent_list = self.db.get_recent_projects(limit=12)
+        if not recent_list:
+            self.lbl_recent_empty.show()
+            self.recent_layout.insertWidget(0, self.lbl_recent_empty)
+            return
+        self.lbl_recent_empty.hide()
+
+        all_projects = {p.id: p for p in self.db.get_projects()}
+
+        for rp in recent_list:
+            project = all_projects.get(rp.project_id)
+            if not project:
+                continue
+
+            card = QFrame()
+            pinned = self.db.is_project_pinned(rp.project_id)
+            border_color = "#f1c40f" if pinned else "#bdc3c7"
+            bg_color = "#fef9e7" if pinned else "white"
+            star = "⭐ " if pinned else ""
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background: {bg_color};
+                    border: 1px solid {border_color};
+                    border-left: 3px solid {border_color};
+                    border-radius: 5px;
+                    padding: 6px 8px;
+                }}
+                QFrame:hover {{ background: #f8f9fa; }}
+            """)
+            card.setCursor(Qt.PointingHandCursor)
+            card.setMinimumWidth(220)
+            card.setMaximumWidth(260)
+            card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            card.setContextMenuPolicy(Qt.CustomContextMenu)
+
+            card_v = QVBoxLayout(card)
+            card_v.setContentsMargins(6, 4, 6, 4)
+            card_v.setSpacing(2)
+
+            project_name = project.name
+            if len(project_name) > 14:
+                project_name = project_name[:14] + "…"
+            t = QLabel(f"{star}<b>{project_name}</b>")
+            t.setTextFormat(Qt.RichText)
+            t.setStyleSheet("font-size: 12px; color: #2c3e50;")
+            t.setWordWrap(False)
+            card_v.addWidget(t)
+
+            extra = []
+            if project.contract_no:
+                cn = project.contract_no
+                if len(cn) > 18:
+                    cn = cn[:18] + "…"
+                extra.append(f"📋 {cn}")
+            if rp.last_viewed_at:
+                extra.append(f"🕐 {rp.last_viewed_at.strftime('%m-%d %H:%M')}")
+            extra.append(f"👁 {rp.view_count}次")
+            info = QLabel(" · ".join(extra))
+            info.setStyleSheet("font-size: 10px; color: #7f8c8d;")
+            info.setWordWrap(False)
+            card_v.addWidget(info)
+
+            card.mousePressEvent = lambda e, pid=rp.project_id: self._quick_open_project(pid)
+            card.customContextMenuRequested.connect(
+                lambda pos, w=card, pid=rp.project_id: self._show_recent_menu(pos, w, pid))
+
+            self.recent_layout.insertWidget(self.recent_layout.count() - 1, card)
+
+    def _show_recent_menu(self, pos, widget: QWidget, project_id: int):
+        menu = QMenu(self)
+        pinned = self.db.is_project_pinned(project_id)
+        text = "📌 取消置顶" if pinned else "📌 设为常用置顶"
+        act_pin = menu.addAction(text)
+        act_open_fill = menu.addAction("📝 打开填报")
+        act_open_report = menu.addAction("📊 生成日报")
+        chosen = menu.exec(widget.mapToGlobal(pos))
+        if chosen == act_pin:
+            self.db.toggle_pin_project(project_id)
+            self._refresh_recent_projects()
+        elif chosen == act_open_fill:
+            self._quick_open_project(project_id, mode="fill")
+        elif chosen == act_open_report:
+            self._quick_open_project(project_id, mode="report")
+
+    def _quick_open_project(self, project_id: int, mode: str = "select"):
+        projects = self.db.get_projects()
+        target = next((p for p in projects if p.id == project_id), None)
+        if not target:
+            return
+
+        idx_a = self.airline_combo.findData(target.airline_id)
+        if idx_a < 0:
+            self.airline_combo.blockSignals(True)
+            self.airline_combo.clear()
+            self.airline_combo.addItem("全部航司", None)
+            airlines = self.db.get_all_airlines()
+            for a in airlines:
+                self.airline_combo.addItem(a.name, a.id)
+            self.airline_combo.blockSignals(False)
+            idx_a = self.airline_combo.findData(target.airline_id)
+        if idx_a >= 0:
+            self.airline_combo.setCurrentIndex(idx_a)
+
+        idx_b = self.base_combo.findData(target.base_id)
+        if idx_b < 0:
+            self.base_combo.blockSignals(True)
+            self.base_combo.clear()
+            self.base_combo.addItem("全部基地", None)
+            bases = self.db.get_all_bases()
+            for b in bases:
+                self.base_combo.addItem(b.name, b.id)
+            self.base_combo.blockSignals(False)
+            idx_b = self.base_combo.findData(target.base_id)
+        if idx_b >= 0:
+            self.base_combo.setCurrentIndex(idx_b)
+
+        self._load_projects()
+        idx_p = self.project_combo.findData(target.id)
+        if idx_p >= 0:
+            self.project_combo.setCurrentIndex(idx_p)
+
+        self._refresh_job_list()
+        self._update_buttons_state()
+
+        if mode == "fill":
+            self._open_risk_entry()
+        elif mode == "report":
+            self._open_daily_report()
 
     def _load_airlines(self):
         airlines = self.db.get_all_airlines()
@@ -323,6 +499,8 @@ class ProjectSelectionWindow(QWidget):
         if not self.current_project:
             QMessageBox.warning(self, "提示", "请先选择合同项目")
             return
+        self.db.touch_recent_project(self.current_project.id)
+        self._refresh_recent_projects()
         self.risk_entry_window = RiskEntryWindow(self.db, self.current_project, self.current_date)
         self.risk_entry_window.jobs_updated.connect(self._refresh_job_list)
         self.risk_entry_window.show()
@@ -331,6 +509,8 @@ class ProjectSelectionWindow(QWidget):
         if not self.current_project:
             QMessageBox.warning(self, "提示", "请先选择合同项目")
             return
+        self.db.touch_recent_project(self.current_project.id)
+        self._refresh_recent_projects()
         self.report_window = DailyReportWindow(self.db, self.current_project, self.current_date)
         self.report_window.show()
 

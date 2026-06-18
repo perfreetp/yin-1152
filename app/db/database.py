@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 
 from app.models.schemas import (
     Airline, MaintenanceBase, ContractProject, Personnel, RiskJob,
-    PersonnelQualification, QualificationIssue,
+    PersonnelQualification, QualificationIssue, FollowUp, RecentProject,
     WORK_TYPES, RISK_LEVELS, JOB_STATUSES, PERMIT_STATUSES,
     PERMIT_WARNING_DAYS, CERT_WARNING_DAYS
 )
@@ -98,17 +98,66 @@ class Database:
                 expiry_date TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS follow_ups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES risk_jobs(id) ON DELETE CASCADE,
+                follow_time TEXT,
+                owner TEXT,
+                action TEXT,
+                review_date TEXT,
+                result TEXT,
+                confirmed INTEGER DEFAULT 0,
+                confirmed_by TEXT,
+                confirmed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS recent_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL UNIQUE REFERENCES contract_projects(id) ON DELETE CASCADE,
+                last_viewed_at TEXT,
+                pinned INTEGER DEFAULT 0,
+                view_count INTEGER DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_risk_jobs_project_date
                 ON risk_jobs(project_id, job_date);
             CREATE INDEX IF NOT EXISTS idx_risk_jobs_status
                 ON risk_jobs(status);
             CREATE INDEX IF NOT EXISTS idx_pq_personnel
                 ON personnel_qualifications(personnel_id);
+            CREATE INDEX IF NOT EXISTS idx_followups_job
+                ON follow_ups(job_id);
         """)
 
         existing_cols = {row["name"] for row in cursor.execute("PRAGMA table_info(risk_jobs)").fetchall()}
         if "close_remark" not in existing_cols:
             cursor.execute("ALTER TABLE risk_jobs ADD COLUMN close_remark TEXT DEFAULT ''")
+
+        for table_sql, table_name in [
+            ("""CREATE TABLE IF NOT EXISTS follow_ups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES risk_jobs(id) ON DELETE CASCADE,
+                follow_time TEXT,
+                owner TEXT,
+                action TEXT,
+                review_date TEXT,
+                result TEXT,
+                confirmed INTEGER DEFAULT 0,
+                confirmed_by TEXT,
+                confirmed_at TEXT
+            )""", "follow_ups"),
+            ("""CREATE TABLE IF NOT EXISTS recent_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL UNIQUE REFERENCES contract_projects(id) ON DELETE CASCADE,
+                last_viewed_at TEXT,
+                pinned INTEGER DEFAULT 0,
+                view_count INTEGER DEFAULT 0
+            )""", "recent_projects"),
+        ]:
+            cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
+            if not cursor.fetchone():
+                cursor.execute(table_sql)
+
         self.conn.commit()
 
     def ensure_demo_data(self):
@@ -116,6 +165,7 @@ class Database:
         cursor.execute("SELECT COUNT(*) FROM airlines")
         if cursor.fetchone()[0] > 0:
             self._ensure_qualification_demo_data(cursor)
+            self._ensure_follow_up_demo_data(cursor)
             self.conn.commit()
             return
 
@@ -291,6 +341,7 @@ class Database:
             self._insert_risk_job(cursor, job)
 
         self._ensure_qualification_demo_data(cursor)
+        self._ensure_follow_up_demo_data(cursor)
         self.conn.commit()
 
     def _ensure_qualification_demo_data(self, cursor):
@@ -691,3 +742,143 @@ class Database:
                 and job.estimated_end_time is not None
                 and job.actual_end_time is not None
                 and job.actual_end_time > job.estimated_end_time)
+
+    # ===== 跟进记录 =====
+    def _row_to_follow_up(self, row: sqlite3.Row) -> FollowUp:
+        return FollowUp(
+            id=row["id"],
+            job_id=row["job_id"],
+            follow_time=datetime.fromisoformat(row["follow_time"]) if row["follow_time"] else None,
+            owner=row["owner"] or "",
+            action=row["action"] or "",
+            review_date=date.fromisoformat(row["review_date"]) if row["review_date"] else None,
+            result=row["result"] or "",
+            confirmed=bool(row["confirmed"]) if row["confirmed"] is not None else False,
+            confirmed_by=row["confirmed_by"] or "",
+            confirmed_at=datetime.fromisoformat(row["confirmed_at"]) if row["confirmed_at"] else None,
+        )
+
+    def get_follow_ups_by_job(self, job_id: int) -> List[FollowUp]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM follow_ups WHERE job_id = ? ORDER BY follow_time ASC",
+            (job_id,)
+        )
+        return [self._row_to_follow_up(r) for r in cursor.fetchall()]
+
+    def save_follow_up(self, fu: FollowUp) -> FollowUp:
+        cursor = self.conn.cursor()
+        if fu.id is None:
+            cursor.execute(
+                """INSERT INTO follow_ups
+                   (job_id, follow_time, owner, action, review_date, result, confirmed, confirmed_by, confirmed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (fu.job_id,
+                 fu.follow_time.isoformat() if fu.follow_time else None,
+                 fu.owner, fu.action,
+                 fu.review_date.isoformat() if fu.review_date else None,
+                 fu.result,
+                 1 if fu.confirmed else 0,
+                 fu.confirmed_by,
+                 fu.confirmed_at.isoformat() if fu.confirmed_at else None)
+            )
+            fu.id = cursor.lastrowid
+        else:
+            cursor.execute(
+                """UPDATE follow_ups SET follow_time=?, owner=?, action=?, review_date=?, result=?,
+                   confirmed=?, confirmed_by=?, confirmed_at=? WHERE id=?""",
+                (fu.follow_time.isoformat() if fu.follow_time else None,
+                 fu.owner, fu.action,
+                 fu.review_date.isoformat() if fu.review_date else None,
+                 fu.result,
+                 1 if fu.confirmed else 0,
+                 fu.confirmed_by,
+                 fu.confirmed_at.isoformat() if fu.confirmed_at else None,
+                 fu.id)
+            )
+        self.conn.commit()
+        return fu
+
+    def delete_follow_up(self, follow_up_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM follow_ups WHERE id = ?", (follow_up_id,))
+        self.conn.commit()
+
+    # ===== 最近项目 =====
+    def _row_to_recent_project(self, row: sqlite3.Row) -> RecentProject:
+        return RecentProject(
+            id=row["id"],
+            project_id=row["project_id"],
+            last_viewed_at=datetime.fromisoformat(row["last_viewed_at"]) if row["last_viewed_at"] else None,
+            pinned=bool(row["pinned"]) if row["pinned"] is not None else False,
+            view_count=row["view_count"] or 0,
+        )
+
+    def touch_recent_project(self, project_id: int):
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        cursor.execute(
+            "SELECT * FROM recent_projects WHERE project_id = ?", (project_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            cursor.execute(
+                "UPDATE recent_projects SET last_viewed_at = ?, view_count = view_count + 1 WHERE project_id = ?",
+                (now, project_id)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO recent_projects (project_id, last_viewed_at, view_count) VALUES (?,?,1)",
+                (project_id, now)
+            )
+        self.conn.commit()
+
+    def get_recent_projects(self, limit: int = 10) -> List[RecentProject]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM recent_projects ORDER BY pinned DESC, last_viewed_at DESC LIMIT ?",
+            (limit,)
+        )
+        return [self._row_to_recent_project(r) for r in cursor.fetchall()]
+
+    def toggle_pin_project(self, project_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT pinned FROM recent_projects WHERE project_id = ?", (project_id,))
+        row = cursor.fetchone()
+        if not row:
+            self.touch_recent_project(project_id)
+        cursor.execute("SELECT pinned FROM recent_projects WHERE project_id = ?", (project_id,))
+        row = cursor.fetchone()
+        new_pinned = 0 if bool(row["pinned"]) else 1
+        cursor.execute("UPDATE recent_projects SET pinned = ? WHERE project_id = ?", (new_pinned, project_id))
+        self.conn.commit()
+        return bool(new_pinned)
+
+    def is_project_pinned(self, project_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT pinned FROM recent_projects WHERE project_id = ?", (project_id,))
+        row = cursor.fetchone()
+        return bool(row["pinned"]) if row else False
+
+    # ===== 跟进示例数据 =====
+    def _ensure_follow_up_demo_data(self, cursor: sqlite3.Cursor):
+        cursor.execute("SELECT id FROM risk_jobs WHERE status IN ('进行中','已关闭') ORDER BY id LIMIT 2")
+        job_rows = cursor.fetchall()
+        now = datetime.now()
+        today = date.today()
+        actions = [
+            ("安全工程师 刘工", "对作业现场隔离措施进行复核，补充警示带2处", today, "复核合格，作业条件满足", True, "项目经理"),
+            ("质量员 陈工", "复查喷漆作业人员资质证有效期，补充台账记录", today + timedelta(days=1), "证件台账已归档", True, "项目经理"),
+        ]
+        for idx, job in enumerate(job_rows):
+            cursor.execute("SELECT COUNT(*) FROM follow_ups WHERE job_id = ?", (job["id"],))
+            if cursor.fetchone()[0] > 0:
+                continue
+            act = actions[idx % len(actions)]
+            cursor.execute(
+                """INSERT INTO follow_ups (job_id, follow_time, owner, action, review_date, result, confirmed, confirmed_by, confirmed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (job["id"], (now - timedelta(hours=idx + 1)).isoformat(),
+                 act[0], act[1], act[2].isoformat(), act[3],
+                 1 if act[4] else 0, act[5], now.isoformat())
+            )
