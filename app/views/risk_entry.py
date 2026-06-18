@@ -2,17 +2,19 @@ from datetime import date, datetime
 from typing import Optional, List
 
 from PySide6.QtCore import Qt, QDate, QTime, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QLabel, QComboBox, QDateEdit, QTimeEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QGroupBox, QListWidget, QListWidgetItem,
     QLineEdit, QTextEdit, QCheckBox, QMessageBox, QFormLayout,
-    QFrame, QScrollArea, QSplitter
+    QFrame, QScrollArea, QSplitter, QDialog, QDialogButtonBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 
 from app.db.database import Database
 from app.models.schemas import (
-    ContractProject, RiskJob, WORK_TYPES, RISK_LEVELS,
-    JOB_STATUSES, PERMIT_STATUSES, Personnel
+    ContractProject, RiskJob, Personnel, PersonnelQualification,
+    WORK_TYPES, RISK_LEVELS, JOB_STATUSES, PERMIT_STATUSES
 )
 
 
@@ -182,15 +184,12 @@ class RiskEntryWindow(QWidget):
 
         self.personnel_list_widget = QListWidget()
         self.personnel_list_widget.setSelectionMode(QListWidget.MultiSelection)
-        self.personnel_list_widget.setMaximumHeight(120)
+        self.personnel_list_widget.setMaximumHeight(140)
         self.personnel_list_widget.setStyleSheet("""
             QListWidget { border: 1px solid #bdc3c7; border-radius: 4px; }
+            QListWidget::item { padding: 4px 6px; border-bottom: 1px solid #ecf0f1; }
         """)
-        for p in self.all_personnel:
-            expiry_str = p.certificate_expiry.isoformat() if p.certificate_expiry else "无"
-            item = QListWidgetItem(f"{p.name} ({p.team}) - 证到期：{expiry_str}")
-            item.setData(Qt.UserRole, p.id)
-            self.personnel_list_widget.addItem(item)
+        self._refresh_personnel_list()
 
         info_box = QGroupBox("作业基础信息")
         info_box.setStyleSheet("""
@@ -220,9 +219,16 @@ class RiskEntryWindow(QWidget):
         safety_form.addRow("隔离措施：", self.isolation_edit)
         safety_form.addRow("许可证状态：", self.permit_status_combo)
         safety_form.addRow("许可证到期日：", self.permit_expiry_edit)
+
+        self.personnel_match_label = QLabel("选择作业类型后将显示人员资质匹配情况")
+        self.personnel_match_label.setStyleSheet("font-size: 11px; color: #7f8c8d; padding: 2px 0;")
+        self.personnel_match_label.setWordWrap(True)
+        safety_form.addRow(self.personnel_match_label)
         safety_form.addRow("参与人员：", self.personnel_list_widget)
         safety_form.addRow("预计结束时间：", est_end_widget)
         self.form_layout.addWidget(safety_box)
+
+        self.work_type_combo.currentIndexChanged.connect(self._update_personnel_match_marks)
 
         review_box = QGroupBox("项目经理审核")
         review_box.setStyleSheet("""
@@ -260,6 +266,11 @@ class RiskEntryWindow(QWidget):
         self.issues_edit.setStyleSheet("QTextEdit { border: 1px solid #e74c3c; }")
         review_layout.addWidget(self.issues_edit)
 
+        self.close_info_label = QLabel("")
+        self.close_info_label.setWordWrap(True)
+        self.close_info_label.setStyleSheet("font-size: 12px; padding: 4px 0;")
+        review_layout.addWidget(self.close_info_label)
+
         self.form_layout.addWidget(review_box)
 
         btn_row = QHBoxLayout()
@@ -279,9 +290,9 @@ class RiskEntryWindow(QWidget):
         self.btn_save.clicked.connect(self._save_job)
         btn_row.addWidget(self.btn_save)
 
-        self.btn_quick_issue = QPushButton("⚡ 快速标记问题")
+        self.btn_quick_issue = QPushButton("🔍 现场审核助手")
         self.btn_quick_issue.setMinimumHeight(40)
-        self.btn_quick_issue.setMinimumWidth(140)
+        self.btn_quick_issue.setMinimumWidth(160)
         self.btn_quick_issue.setStyleSheet("""
             QPushButton {
                 background: #e67e22; color: white; font-weight: bold;
@@ -289,7 +300,7 @@ class RiskEntryWindow(QWidget):
             }
             QPushButton:hover { background: #f39c12; }
         """)
-        self.btn_quick_issue.clicked.connect(self._quick_detect_issues)
+        self.btn_quick_issue.clicked.connect(self._open_audit_assistant)
         btn_row.addWidget(self.btn_quick_issue)
 
         self.form_layout.addLayout(btn_row)
@@ -401,7 +412,7 @@ class RiskEntryWindow(QWidget):
             self.est_end_time.setTime(QTime(
                 job.estimated_end_time.hour, job.estimated_end_time.minute))
 
-        self.personnel_list_widget.clearSelection()
+        self._refresh_personnel_list()
         for i in range(self.personnel_list_widget.count()):
             item = self.personnel_list_widget.item(i)
             if item.data(Qt.UserRole) in job.personnel_ids:
@@ -411,6 +422,31 @@ class RiskEntryWindow(QWidget):
         self.chk_reviewed.setChecked(job.reviewed_by_pm)
         self.pm_comments_edit.setPlainText(job.pm_comments)
         self.issues_edit.setPlainText(job.issues)
+        self._update_close_info(job)
+
+    def _update_close_info(self, job: RiskJob):
+        if job.status != "已关闭":
+            self.close_info_label.setText("")
+            self.close_info_label.setStyleSheet("font-size: 12px; padding: 4px 0;")
+            return
+        actual_str = job.actual_end_time.strftime("%m-%d %H:%M") if job.actual_end_time else "未填写"
+        est_str = job.estimated_end_time.strftime("%m-%d %H:%M") if job.estimated_end_time else "无"
+        overdue = self.db.is_overdue_closed(job)
+        if overdue:
+            over_hours = (job.actual_end_time - job.estimated_end_time).total_seconds() / 3600
+            tag = f"🔴 超时关闭（超时 {over_hours:.1f} 小时）"
+            color = "#c0392b"
+        else:
+            tag = "🟢 按时关闭"
+            color = "#27ae60"
+        remark = job.close_remark or "无"
+        self.close_info_label.setText(
+            f"🚪 已关闭 | 实际结束：{actual_str} | 预计：{est_str} | {tag}\n关闭说明：{remark}"
+        )
+        self.close_info_label.setStyleSheet(
+            f"font-size: 12px; padding: 6px 8px; color: {color}; font-weight: bold; "
+            f"background: {'#fdecea' if overdue else '#eafaf1'}; border-radius: 4px;"
+        )
 
     def _collect_form(self) -> Optional[RiskJob]:
         if not self.work_location_edit.text().strip():
@@ -456,9 +492,26 @@ class RiskEntryWindow(QWidget):
         return job
 
     def _save_job(self):
+        old_status = self.current_job.status if (self.current_job and self.current_job.id) else None
         job = self._collect_form()
         if not job:
             return
+
+        if job.status == "已关闭" and old_status != "已关闭":
+            dlg = CloseJobDialog(self.job_date, job.estimated_end_time, self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            d = dlg.actual_date.date()
+            t = dlg.actual_time.time()
+            job.actual_end_time = datetime(d.year(), d.month(), d.day(), t.hour(), t.minute())
+            remark = dlg.remark_edit.toPlainText().strip()
+            if job.estimated_end_time and job.actual_end_time > job.estimated_end_time:
+                over_hours = (job.actual_end_time - job.estimated_end_time).total_seconds() / 3600
+                tag = f"【超时关闭·超时{over_hours:.1f}小时】"
+            else:
+                tag = "【按时关闭】"
+            job.close_remark = tag + (remark if remark else "")
+
         job.id = self.db.save_risk_job(job)
         self.current_job = job
         QMessageBox.information(self, "成功", "作业信息已保存")
@@ -471,39 +524,84 @@ class RiskEntryWindow(QWidget):
                 self.job_list.setCurrentItem(item)
                 break
 
-    def _quick_detect_issues(self):
+    def _refresh_personnel_list(self):
+        self.all_personnel = self.db.get_all_personnel()
+        self.personnel_list_widget.clear()
+        work_type = self.work_type_combo.currentText() if self.work_type_combo else ""
+        today = date.today()
+        for p in self.all_personnel:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, p.id)
+            self._apply_personnel_match_mark(item, p, work_type, today)
+            self.personnel_list_widget.addItem(item)
+        self._update_match_summary()
+
+    def _apply_personnel_match_mark(self, item, p, work_type, today):
+        expiry_str = p.certificate_expiry.isoformat() if p.certificate_expiry else "无"
+        if work_type:
+            chk = self.db.check_qualification(p.id, work_type)
+            status = chk["status"]
+            if status == "无资质":
+                tag, color = "❌无资质", "#c0392b"
+            elif status == "已过期":
+                tag, color = "⚠证过期", "#c0392b"
+            elif status == "即将过期":
+                days = (chk["expiry_date"] - today).days
+                tag, color = f"⚠临期{days}天", "#e67e22"
+            else:
+                tag, color = "✓匹配", "#27ae60"
+        else:
+            tag, color = "", "#2c3e50"
+        item.setText(f"{p.name}（{p.team}）{tag}  上岗证：{expiry_str}")
+        item.setForeground(QColor(color))
+
+    def _update_personnel_match_marks(self):
+        work_type = self.work_type_combo.currentText()
+        today = date.today()
+        for i in range(self.personnel_list_widget.count()):
+            item = self.personnel_list_widget.item(i)
+            pid = item.data(Qt.UserRole)
+            p = next((x for x in self.all_personnel if x.id == pid), None)
+            if p:
+                selected = item.isSelected()
+                self._apply_personnel_match_mark(item, p, work_type, today)
+                if selected:
+                    item.setSelected(True)
+        self._update_match_summary()
+
+    def _update_match_summary(self):
+        work_type = self.work_type_combo.currentText()
+        if not work_type:
+            self.personnel_match_label.setText("选择作业类型后将显示人员资质匹配情况")
+            return
+        match = no_qual = warn = 0
+        for i in range(self.personnel_list_widget.count()):
+            item = self.personnel_list_widget.item(i)
+            pid = item.data(Qt.UserRole)
+            chk = self.db.check_qualification(pid, work_type)
+            s = chk["status"]
+            if s == "无资质":
+                no_qual += 1
+            elif s in ("已过期", "即将过期"):
+                warn += 1
+            else:
+                match += 1
+        self.personnel_match_label.setText(
+            f"当前作业类型【{work_type}】：✓匹配 {match} 人 · 无资质 {no_qual} 人 · 证过期/临期 {warn} 人"
+        )
+
+    def _open_audit_assistant(self):
         job = self._collect_form()
         if not job:
             return
-        issues = []
-
-        if job.permit_status == "已过期":
-            issues.append("许可证已过期，作业暂停")
-        elif job.permit_status == "即将过期":
-            issues.append("许可证即将过期，需及时续办")
-        elif job.permit_status == "未办理":
-            issues.append("未办理作业许可证")
-
-        today = date.today()
-        if job.permit_expiry and job.permit_expiry < today:
-            issues.append("许可证到期日早于今日")
-        elif job.permit_expiry and (job.permit_expiry - today).days <= 3:
-            issues.append(f"许可证剩余{(job.permit_expiry - today).days}天到期")
-
-        personnel = self.db.get_personnel_by_ids(job.personnel_ids)
-        for p in personnel:
-            if p.certificate_expiry and p.certificate_expiry < today:
-                issues.append(f"人员【{p.name}】证照已过期")
-            elif p.certificate_expiry and (p.certificate_expiry - today).days <= 30:
-                issues.append(f"人员【{p.name}】证照{(p.certificate_expiry - today).days}天后到期")
-
-        if issues:
+        issues = self.db.detect_job_issues(job)
+        dlg = AuditAssistantDialog(job, issues, self)
+        if dlg.exec() == QDialog.Accepted and dlg.issues_text.strip():
             existing = self.issues_edit.toPlainText().strip()
-            text = existing + ("\n" if existing else "") + "；".join(issues)
-            self.issues_edit.setPlainText(text)
-            QMessageBox.information(self, "检测结果", f"发现 {len(issues)} 项问题，已填入问题栏")
-        else:
-            QMessageBox.information(self, "检测结果", "未发现明显问题")
+            new_text = dlg.issues_text.strip()
+            combined = existing + ("\n" if existing else "") + new_text
+            self.issues_edit.setPlainText(combined)
+            QMessageBox.information(self, "已写入", "审核问题已写入问题栏，请记得保存作业信息。")
 
     def _delete_job(self):
         if not self.current_job or not self.current_job.id:
@@ -519,3 +617,185 @@ class RiskEntryWindow(QWidget):
             self._enable_form(False)
             self._refresh_job_list()
             self.jobs_updated.emit()
+
+
+class CloseJobDialog(QDialog):
+    def __init__(self, job_date: date, estimated_end_time, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("关闭作业")
+        self.setMinimumWidth(420)
+        self._build(job_date, estimated_end_time)
+
+    def _build(self, job_date, estimated_end_time):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        title = QLabel("🚪 确认关闭作业")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(title)
+
+        est_str = estimated_end_time.strftime("%Y-%m-%d %H:%M") if estimated_end_time else "未设置"
+        est_lbl = QLabel(f"预计结束时间：{est_str}")
+        est_lbl.setStyleSheet("font-size: 13px; color: #7f8c8d;")
+        layout.addWidget(est_lbl)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self.actual_date = QDateEdit()
+        self.actual_date.setCalendarPopup(True)
+        self.actual_date.setDisplayFormat("yyyy-MM-dd")
+        self.actual_date.setDate(QDate(job_date.year, job_date.month, job_date.day))
+
+        self.actual_time = QTimeEdit()
+        self.actual_time.setDisplayFormat("HH:mm")
+        self.actual_time.setTime(QTime.currentTime())
+
+        if estimated_end_time:
+            self.actual_date.setDate(QDate(
+                estimated_end_time.year, estimated_end_time.month, estimated_end_time.day))
+            self.actual_time.setTime(QTime(
+                estimated_end_time.hour, estimated_end_time.minute))
+
+        time_row = QHBoxLayout()
+        time_row.addWidget(self.actual_date)
+        time_row.addWidget(self.actual_time)
+        time_widget = QWidget()
+        time_widget.setLayout(time_row)
+        form.addRow("实际结束时间：", time_widget)
+
+        self.remark_edit = QTextEdit()
+        self.remark_edit.setMaximumHeight(80)
+        self.remark_edit.setPlaceholderText("关闭说明，如：作业按时完成、外观检查合格等")
+        form.addRow("关闭说明：", self.remark_edit)
+
+        layout.addLayout(form)
+
+        self.overdue_hint = QLabel("")
+        self.overdue_hint.setWordWrap(True)
+        self.overdue_hint.setStyleSheet("font-size: 12px; padding: 4px 0;")
+        layout.addWidget(self.overdue_hint)
+
+        self.actual_date.dateChanged.connect(self._update_overdue_hint)
+        self.actual_time.timeChanged.connect(self._update_overdue_hint)
+        self._estimated_end_time = estimated_end_time
+        self._update_overdue_hint()
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("确认关闭")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _update_overdue_hint(self):
+        if not self._estimated_end_time:
+            self.overdue_hint.setText("（未设置预计结束时间，无法判断是否超时）")
+            self.overdue_hint.setStyleSheet("font-size: 12px; color: #7f8c8d; padding: 4px 0;")
+            return
+        d = self.actual_date.date()
+        t = self.actual_time.time()
+        actual = datetime(d.year(), d.month(), d.day(), t.hour(), t.minute())
+        if actual > self._estimated_end_time:
+            over_hours = (actual - self._estimated_end_time).total_seconds() / 3600
+            self.overdue_hint.setText(f"🔴 将标记为超时关闭（超时 {over_hours:.1f} 小时）")
+            self.overdue_hint.setStyleSheet("font-size: 12px; color: #c0392b; padding: 4px 0; font-weight: bold;")
+        else:
+            self.overdue_hint.setText("🟢 将标记为按时关闭")
+            self.overdue_hint.setStyleSheet("font-size: 12px; color: #27ae60; padding: 4px 0; font-weight: bold;")
+
+
+class AuditAssistantDialog(QDialog):
+    def __init__(self, job: RiskJob, issues, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("现场审核助手")
+        self.setMinimumSize(680, 480)
+        self.issues_text = ""
+        self._build(job, issues)
+
+    def _build(self, job, issues):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel("🔍 现场审核助手")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(title)
+
+        summary = QLabel(
+            f"作业类型：{job.work_type} · 位置：{job.work_location or '-'} · "
+            f"参与人员：{len(job.personnel_ids)} 人"
+        )
+        summary.setStyleSheet("font-size: 13px; color: #7f8c8d;")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        if issues:
+            table = QTableWidget(len(issues), 4)
+            table.setHorizontalHeaderLabels(["类别", "对象", "问题描述", "选择"])
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+            table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            table.setStyleSheet("""
+                QTableWidget { border: 1px solid #bdc3c7; border-radius: 4px; background: white; }
+                QHeaderView::section { background: #ecf0f1; font-weight: bold; padding: 6px; }
+            """)
+            type_colors = {
+                "资质不匹配": "#c0392b",
+                "证照过期": "#c0392b",
+                "上岗证过期": "#c0392b",
+                "许可证过期": "#c0392b",
+                "许可证已过期": "#c0392b",
+                "超时未关闭": "#e67e22",
+                "证照即将过期": "#e67e22",
+                "上岗证即将过期": "#e67e22",
+                "许可证即将过期": "#e67e22",
+                "许可证临期": "#e67e22",
+                "未办理许可证": "#e67e22",
+            }
+            for i, issue in enumerate(issues):
+                obj = issue.personnel_name if issue.personnel_name else "作业整体"
+                type_item = QTableWidgetItem(issue.issue_type)
+                color = type_colors.get(issue.issue_type, "#34495e")
+                type_item.setForeground(QColor(color))
+                table.setItem(i, 0, type_item)
+                table.setItem(i, 1, QTableWidgetItem(obj))
+                table.setItem(i, 2, QTableWidgetItem(issue.detail))
+                chk_item = QTableWidgetItem()
+                chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                chk_item.setCheckState(Qt.Checked)
+                table.setItem(i, 3, chk_item)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self._table = table
+            self._issues = issues
+            layout.addWidget(table, 1)
+
+            hint = QLabel("已勾选的问题将写入作业的「问题」栏。可取消勾选不需要记录的项。")
+            hint.setStyleSheet("font-size: 11px; color: #7f8c8d;")
+            layout.addWidget(hint)
+        else:
+            ok_lbl = QLabel("✅ 未发现问题\n\n当前作业的人员资质、许可证、证照有效期均符合要求。")
+            ok_lbl.setStyleSheet("font-size: 15px; color: #27ae60; padding: 30px;")
+            ok_lbl.setAlignment(Qt.AlignCenter)
+            layout.addWidget(ok_lbl)
+            self._table = None
+            self._issues = []
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("写入问题栏")
+        btns.button(QDialogButtonBox.Cancel).setText("关闭")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _on_accept(self):
+        if self._table:
+            selected = []
+            for i, issue in enumerate(self._issues):
+                chk = self._table.item(i, 3)
+                if chk and chk.checkState() == Qt.Checked:
+                    obj = issue.personnel_name if issue.personnel_name else ""
+                    prefix = f"【{issue.issue_type}】" + (f"{obj}：" if obj else "：")
+                    selected.append(prefix + issue.detail)
+            self.issues_text = "\n".join(selected)
+        self.accept()

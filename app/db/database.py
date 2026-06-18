@@ -5,7 +5,9 @@ from typing import List, Optional, Dict, Any
 
 from app.models.schemas import (
     Airline, MaintenanceBase, ContractProject, Personnel, RiskJob,
-    WORK_TYPES, RISK_LEVELS, JOB_STATUSES, PERMIT_STATUSES
+    PersonnelQualification, QualificationIssue,
+    WORK_TYPES, RISK_LEVELS, JOB_STATUSES, PERMIT_STATUSES,
+    PERMIT_WARNING_DAYS, CERT_WARNING_DAYS
 )
 
 
@@ -78,6 +80,7 @@ class Database:
                 personnel_ids TEXT,
                 estimated_end_time TEXT,
                 actual_end_time TEXT,
+                close_remark TEXT DEFAULT '',
                 status TEXT DEFAULT '未开工',
                 need_client_safety_officer INTEGER DEFAULT 0,
                 reviewed_by_pm INTEGER DEFAULT 0,
@@ -87,17 +90,33 @@ class Database:
                 updated_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS personnel_qualifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                personnel_id INTEGER NOT NULL REFERENCES personnel(id) ON DELETE CASCADE,
+                work_type TEXT NOT NULL,
+                certificate_no TEXT,
+                expiry_date TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_risk_jobs_project_date
                 ON risk_jobs(project_id, job_date);
             CREATE INDEX IF NOT EXISTS idx_risk_jobs_status
                 ON risk_jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_pq_personnel
+                ON personnel_qualifications(personnel_id);
         """)
+
+        existing_cols = {row["name"] for row in cursor.execute("PRAGMA table_info(risk_jobs)").fetchall()}
+        if "close_remark" not in existing_cols:
+            cursor.execute("ALTER TABLE risk_jobs ADD COLUMN close_remark TEXT DEFAULT ''")
         self.conn.commit()
 
     def ensure_demo_data(self):
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM airlines")
         if cursor.fetchone()[0] > 0:
+            self._ensure_qualification_demo_data(cursor)
+            self.conn.commit()
             return
 
         today = date.today()
@@ -230,8 +249,26 @@ class Database:
                 permit_status="有效", permit_expiry=today + timedelta(days=20),
                 personnel_ids=[5],
                 estimated_end_time=datetime(today.year, today.month, today.day, 22, 0),
+                actual_end_time=datetime(today.year, today.month, today.day, 21, 30),
+                close_remark="清洗作业按时完成，外观检查合格",
                 status="已关闭", need_client_safety_officer=False,
                 reviewed_by_pm=True, pm_comments="已按时完成，无异常",
+                issues=""
+            ),
+            RiskJob(
+                project_id=projects[1].id, job_date=today,
+                work_type="打磨作业", work_location="B737起落架舱",
+                aircraft_no="B-5238", team="打磨班", team_leader="王志强",
+                risk_level="中风险",
+                description="起落架舱内部打磨除锈",
+                isolation_measures="受限空间作业，通风设备开启，专人监护",
+                permit_status="有效", permit_expiry=today + timedelta(days=10),
+                personnel_ids=[3],
+                estimated_end_time=datetime(today.year, today.month, today.day, 14, 0),
+                actual_end_time=datetime(today.year, today.month, today.day, 15, 30),
+                close_remark="因配合航线排故延后开工，实际超时1.5小时关闭",
+                status="已关闭", need_client_safety_officer=False,
+                reviewed_by_pm=True, pm_comments="超时已记录，后续优化排故衔接",
                 issues=""
             ),
             RiskJob(
@@ -253,7 +290,38 @@ class Database:
         for job in demo_jobs:
             self._insert_risk_job(cursor, job)
 
+        self._ensure_qualification_demo_data(cursor)
         self.conn.commit()
+
+    def _ensure_qualification_demo_data(self, cursor):
+        cursor.execute("SELECT COUNT(*) FROM personnel_qualifications")
+        if cursor.fetchone()[0] > 0:
+            return
+        cursor.execute("SELECT id, employee_id FROM personnel")
+        rows = cursor.fetchall()
+        if not rows:
+            return
+        emp_map = {r["employee_id"]: r["id"] for r in rows}
+        today = date.today()
+        quals = [
+            ("E001", "喷漆作业", "CAAC-PT-001A", today + timedelta(days=180)),
+            ("E001", "高空作业", "CAAC-HW-001", today + timedelta(days=200)),
+            ("E002", "喷漆作业", "CAAC-PT-002A", today + timedelta(days=30)),
+            ("E003", "打磨作业", "CAAC-DM-001A", today + timedelta(days=365)),
+            ("E003", "受限空间作业", "CAAC-CS-001", today + timedelta(days=300)),
+            ("E004", "结构拆装", "CAAC-ST-001A", today - timedelta(days=10)),
+            ("E004", "动火作业", "CAAC-FH-001", today + timedelta(days=100)),
+            ("E005", "清洗作业", "CAAC-CL-001A", today + timedelta(days=90)),
+            ("E005", "高空作业", "CAAC-HW-005", today + timedelta(days=150)),
+            ("E006", "结构拆装", "CAAC-ST-002A", today + timedelta(days=200)),
+        ]
+        for emp_id, wt, cno, exp in quals:
+            pid = emp_map.get(emp_id)
+            if pid:
+                cursor.execute(
+                    "INSERT INTO personnel_qualifications (personnel_id, work_type, certificate_no, expiry_date) VALUES (?,?,?,?)",
+                    (pid, wt, cno, exp.isoformat())
+                )
 
     def _insert_risk_job(self, cursor, job: RiskJob):
         now = datetime.now().isoformat()
@@ -263,10 +331,10 @@ class Database:
                 project_id, job_date, work_type, work_location, aircraft_no,
                 team, team_leader, risk_level, description, isolation_measures,
                 permit_status, permit_expiry, personnel_ids,
-                estimated_end_time, actual_end_time, status,
+                estimated_end_time, actual_end_time, close_remark, status,
                 need_client_safety_officer, reviewed_by_pm, pm_comments,
                 issues, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job.project_id,
                 job.job_date.isoformat() if job.job_date else None,
@@ -278,6 +346,7 @@ class Database:
                 personnel_ids_str,
                 job.estimated_end_time.isoformat() if job.estimated_end_time else None,
                 job.actual_end_time.isoformat() if job.actual_end_time else None,
+                job.close_remark,
                 job.status,
                 1 if job.need_client_safety_officer else 0,
                 1 if job.reviewed_by_pm else 0,
@@ -376,6 +445,7 @@ class Database:
             personnel_ids=personnel_ids,
             estimated_end_time=datetime.fromisoformat(r["estimated_end_time"]) if r["estimated_end_time"] else None,
             actual_end_time=datetime.fromisoformat(r["actual_end_time"]) if r["actual_end_time"] else None,
+            close_remark=r["close_remark"] if "close_remark" in r.keys() else "",
             status=r["status"],
             need_client_safety_officer=bool(r["need_client_safety_officer"]),
             reviewed_by_pm=bool(r["reviewed_by_pm"]),
@@ -396,7 +466,7 @@ class Database:
                     project_id=?, job_date=?, work_type=?, work_location=?, aircraft_no=?,
                     team=?, team_leader=?, risk_level=?, description=?, isolation_measures=?,
                     permit_status=?, permit_expiry=?, personnel_ids=?,
-                    estimated_end_time=?, actual_end_time=?, status=?,
+                    estimated_end_time=?, actual_end_time=?, close_remark=?, status=?,
                     need_client_safety_officer=?, reviewed_by_pm=?, pm_comments=?,
                     issues=?, updated_at=?
                 WHERE id=?""",
@@ -411,6 +481,7 @@ class Database:
                     personnel_ids_str,
                     job.estimated_end_time.isoformat() if job.estimated_end_time else None,
                     job.actual_end_time.isoformat() if job.actual_end_time else None,
+                    job.close_remark,
                     job.status,
                     1 if job.need_client_safety_officer else 0,
                     1 if job.reviewed_by_pm else 0,
@@ -446,3 +517,177 @@ class Database:
             (project_id, job_date.isoformat())
         )
         return cursor.fetchone()[0]
+
+    # ===== Personnel 维护 =====
+    def save_personnel(self, p: Personnel) -> int:
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        if p.id:
+            cursor.execute(
+                """UPDATE personnel SET name=?, employee_id=?, team=?, position=?,
+                   certificate_no=?, certificate_expiry=?, qualifications=?
+                   WHERE id=?""",
+                (p.name, p.employee_id, p.team, p.position, p.certificate_no,
+                 p.certificate_expiry.isoformat() if p.certificate_expiry else None,
+                 p.qualifications, p.id)
+            )
+        else:
+            cursor.execute(
+                """INSERT INTO personnel (name, employee_id, team, position,
+                   certificate_no, certificate_expiry, qualifications)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (p.name, p.employee_id, p.team, p.position, p.certificate_no,
+                 p.certificate_expiry.isoformat() if p.certificate_expiry else None,
+                 p.qualifications)
+            )
+            p.id = cursor.lastrowid
+        self.conn.commit()
+        return p.id
+
+    def delete_personnel(self, personnel_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM personnel_qualifications WHERE personnel_id=?", (personnel_id,))
+        cursor.execute("DELETE FROM personnel WHERE id=?", (personnel_id,))
+        self.conn.commit()
+
+    # ===== Personnel Qualifications =====
+    def get_qualifications_by_personnel(self, personnel_id: int) -> List[PersonnelQualification]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM personnel_qualifications WHERE personnel_id=? ORDER BY work_type",
+            (personnel_id,)
+        )
+        return [self._row_to_qual(r) for r in cursor.fetchall()]
+
+    def get_all_qualifications(self) -> Dict[int, List[PersonnelQualification]]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM personnel_qualifications ORDER BY personnel_id, work_type")
+        result: Dict[int, List[PersonnelQualification]] = {}
+        for r in cursor.fetchall():
+            q = self._row_to_qual(r)
+            result.setdefault(q.personnel_id, []).append(q)
+        return result
+
+    def _row_to_qual(self, r: sqlite3.Row) -> PersonnelQualification:
+        return PersonnelQualification(
+            id=r["id"], personnel_id=r["personnel_id"],
+            work_type=r["work_type"], certificate_no=r["certificate_no"] or "",
+            expiry_date=date.fromisoformat(r["expiry_date"]) if r["expiry_date"] else None
+        )
+
+    def save_qualification(self, q: PersonnelQualification) -> int:
+        cursor = self.conn.cursor()
+        if q.id:
+            cursor.execute(
+                "UPDATE personnel_qualifications SET personnel_id=?, work_type=?, certificate_no=?, expiry_date=? WHERE id=?",
+                (q.personnel_id, q.work_type, q.certificate_no,
+                 q.expiry_date.isoformat() if q.expiry_date else None, q.id)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO personnel_qualifications (personnel_id, work_type, certificate_no, expiry_date) VALUES (?, ?, ?, ?)",
+                (q.personnel_id, q.work_type, q.certificate_no,
+                 q.expiry_date.isoformat() if q.expiry_date else None)
+            )
+            q.id = cursor.lastrowid
+        self.conn.commit()
+        return q.id
+
+    def delete_qualification(self, qual_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM personnel_qualifications WHERE id=?", (qual_id,))
+        self.conn.commit()
+
+    def check_qualification(self, personnel_id: int, work_type: str) -> Dict[str, Any]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM personnel_qualifications WHERE personnel_id=? AND work_type=?",
+            (personnel_id, work_type)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"has_qual": False, "expired": False, "expiring_soon": False,
+                    "expiry_date": None, "status": "无资质"}
+        q = self._row_to_qual(row)
+        today = date.today()
+        expired = q.expiry_date is not None and q.expiry_date < today
+        expiring = (not expired and q.expiry_date is not None
+                    and (q.expiry_date - today).days <= CERT_WARNING_DAYS)
+        if expired:
+            status = "已过期"
+        elif expiring:
+            status = "即将过期"
+        else:
+            status = "有效"
+        return {"has_qual": True, "expired": expired, "expiring_soon": expiring,
+                "expiry_date": q.expiry_date, "status": status}
+
+    # ===== 审核助手：综合问题检测 =====
+    def detect_job_issues(self, job: RiskJob) -> List[QualificationIssue]:
+        issues: List[QualificationIssue] = []
+        today = date.today()
+        now = datetime.now()
+
+        if job.permit_status == "已过期":
+            issues.append(QualificationIssue(0, "", "许可证过期", job.work_type, "许可证状态为已过期，作业应暂停"))
+        elif job.permit_status == "未办理":
+            issues.append(QualificationIssue(0, "", "未办理许可证", job.work_type, "尚未办理作业许可证"))
+        elif job.permit_status == "即将过期":
+            issues.append(QualificationIssue(0, "", "许可证即将过期", job.work_type, "许可证即将过期，需及时续办"))
+
+        if job.permit_expiry:
+            days = (job.permit_expiry - today).days
+            if days < 0:
+                issues.append(QualificationIssue(0, "", "许可证已过期", job.work_type,
+                                                 f"许可证于 {job.permit_expiry.isoformat()} 过期（已逾期 {-days} 天）"))
+            elif days <= PERMIT_WARNING_DAYS:
+                issues.append(QualificationIssue(0, "", "许可证临期", job.work_type,
+                                                 f"许可证剩余 {days} 天到期"))
+
+        personnel = self.get_personnel_by_ids(job.personnel_ids)
+        for p in personnel:
+            quals = self.get_qualifications_by_personnel(p.id)
+            matched = [q for q in quals if q.work_type == job.work_type]
+            if not matched:
+                issues.append(QualificationIssue(p.id, p.name, "资质不匹配", job.work_type,
+                                                 f"{p.name} 无 {job.work_type} 作业资质"))
+            else:
+                for q in matched:
+                    if q.expiry_date:
+                        days = (q.expiry_date - today).days
+                        if days < 0:
+                            issues.append(QualificationIssue(p.id, p.name, "证照过期", job.work_type,
+                                                             f"{p.name} 的{job.work_type}资质证已于 {q.expiry_date.isoformat()} 过期"))
+                        elif days <= CERT_WARNING_DAYS:
+                            issues.append(QualificationIssue(p.id, p.name, "证照即将过期", job.work_type,
+                                                             f"{p.name} 的{job.work_type}资质证剩余 {days} 天到期"))
+
+            if p.certificate_expiry:
+                days = (p.certificate_expiry - today).days
+                if days < 0:
+                    issues.append(QualificationIssue(p.id, p.name, "上岗证过期", job.work_type,
+                                                     f"{p.name} 的上岗证已于 {p.certificate_expiry.isoformat()} 过期"))
+                elif days <= CERT_WARNING_DAYS:
+                    issues.append(QualificationIssue(p.id, p.name, "上岗证即将过期", job.work_type,
+                                                     f"{p.name} 的上岗证剩余 {days} 天到期"))
+
+        if job.status == "进行中" and job.estimated_end_time and job.estimated_end_time < now:
+            delta = now - job.estimated_end_time
+            hours = delta.total_seconds() / 3600
+            issues.append(QualificationIssue(0, "", "超时未关闭", job.work_type,
+                                             f"作业预计 {job.estimated_end_time.strftime('%H:%M')} 结束，已超时 {hours:.1f} 小时未关闭"))
+
+        return issues
+
+    # ===== 协调会摘要查询 =====
+    def get_overdue_open_jobs(self, project_id: int, job_date: date) -> List[RiskJob]:
+        jobs = self.get_risk_jobs(project_id=project_id, job_date=job_date)
+        now = datetime.now()
+        return [j for j in jobs if j.status == "进行中"
+                and j.estimated_end_time and j.estimated_end_time < now]
+
+    def is_overdue_closed(self, job: RiskJob) -> bool:
+        return (job.status == "已关闭"
+                and job.estimated_end_time is not None
+                and job.actual_end_time is not None
+                and job.actual_end_time > job.estimated_end_time)

@@ -11,6 +11,7 @@ from app.db.database import Database
 from app.models.schemas import ContractProject, WORK_TYPES, RISK_LEVELS, JOB_STATUSES
 from app.views.risk_entry import RiskEntryWindow
 from app.views.daily_report import DailyReportWindow
+from app.views.personnel_qualification import PersonnelQualificationWindow
 
 
 RISK_COLORS = {
@@ -29,6 +30,7 @@ class ProjectSelectionWindow(QWidget):
         self.current_date: date = date.today()
         self.risk_entry_window: Optional[RiskEntryWindow] = None
         self.report_window: Optional[DailyReportWindow] = None
+        self.personnel_window: Optional[PersonnelQualificationWindow] = None
         self._init_ui()
         self._load_airlines()
         self._load_bases()
@@ -197,6 +199,18 @@ class ProjectSelectionWindow(QWidget):
         hint.setWordWrap(True)
         summary_layout.addWidget(hint)
 
+        self.btn_personnel = QPushButton("👤 人员资质管理")
+        self.btn_personnel.setMinimumHeight(36)
+        self.btn_personnel.setStyleSheet("""
+            QPushButton {
+                background: #16a085; color: white; font-weight: bold;
+                border: none; border-radius: 6px; font-size: 13px;
+            }
+            QPushButton:hover { background: #1abc9c; }
+        """)
+        self.btn_personnel.clicked.connect(self._open_personnel_qual)
+        summary_layout.addWidget(self.btn_personnel)
+
         right.addWidget(summary_box)
         right.addStretch(1)
         content.addLayout(right, 1)
@@ -319,3 +333,13 @@ class ProjectSelectionWindow(QWidget):
             return
         self.report_window = DailyReportWindow(self.db, self.current_project, self.current_date)
         self.report_window.show()
+
+    def _open_personnel_qual(self):
+        self.personnel_window = PersonnelQualificationWindow(self.db)
+        self.personnel_window.personnel_updated.connect(self._on_personnel_updated)
+        self.personnel_window.show()
+
+    def _on_personnel_updated(self):
+        if self.risk_entry_window and self.risk_entry_window.isVisible():
+            self.risk_entry_window._refresh_personnel_list()
+        self._refresh_job_list()

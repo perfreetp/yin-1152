@@ -30,10 +30,12 @@ STATUS_COLORS = {
 
 
 class RiskCard(QFrame):
-    def __init__(self, job: RiskJob, personnel: List[Personnel]):
+    def __init__(self, job: RiskJob, personnel: List[Personnel],
+                 is_overdue_closed: bool = False):
         super().__init__()
         self.job = job
         self.personnel = personnel
+        self.is_overdue_closed = is_overdue_closed
         self._build()
 
     def _build(self):
@@ -126,21 +128,29 @@ class RiskCard(QFrame):
         elif self.job.permit_status == "未办理":
             permit_color = "#95a5a6"
 
-        add_info(0, "班组/负责人", f"{self.job.team} · {self.job.team_leader}")
-        add_info(1, "许可证", self.job.permit_status, permit_color)
+        row = 0
+        add_info(row, "班组/负责人", f"{self.job.team} · {self.job.team_leader}"); row += 1
+        add_info(row, "许可证", self.job.permit_status, permit_color); row += 1
         if self.job.permit_expiry:
-            add_info(2, "许可到期", self.job.permit_expiry.isoformat(), permit_color)
+            add_info(row, "许可到期", self.job.permit_expiry.isoformat(), permit_color); row += 1
         est_end_str = "-"
         if self.job.estimated_end_time:
             est_end_str = self.job.estimated_end_time.strftime("%m-%d %H:%M")
-        add_info(3, "预计关闭", est_end_str)
+        add_info(row, "预计关闭", est_end_str); row += 1
+
+        if self.job.status == "已关闭":
+            actual_str = self.job.actual_end_time.strftime("%m-%d %H:%M") if self.job.actual_end_time else "未填"
+            close_color = "#c0392b" if self.is_overdue_closed else "#27ae60"
+            add_info(row, "实际关闭", actual_str, close_color); row += 1
+            close_tag = "🔴 超时关闭" if self.is_overdue_closed else "🟢 按时关闭"
+            add_info(row, "关闭结果", close_tag, close_color); row += 1
 
         if self.personnel:
             names = "、".join(p.name for p in self.personnel)
             names_lbl = QLabel(f"人员：{names}")
             names_lbl.setStyleSheet("font-size: 11px; color: #2c3e50;")
             names_lbl.setWordWrap(True)
-            info_grid.addWidget(names_lbl, 4, 0, 1, 2)
+            info_grid.addWidget(names_lbl, row, 0, 1, 2)
 
         layout.addLayout(info_grid)
 
@@ -163,6 +173,17 @@ class RiskCard(QFrame):
             issue_lbl.setStyleSheet("font-size: 11px; color: #c0392b; font-weight: bold;")
             issue_lbl.setWordWrap(True)
             layout.addWidget(issue_lbl)
+
+        if self.job.status == "已关闭" and self.job.close_remark:
+            sep_close = QFrame()
+            sep_close.setFrameShape(QFrame.HLine)
+            close_color = "#c0392b" if self.is_overdue_closed else "#27ae60"
+            sep_close.setStyleSheet(f"color: {close_color};")
+            layout.addWidget(sep_close)
+            close_lbl = QLabel(f"🚪 {self.job.close_remark}")
+            close_lbl.setStyleSheet(f"font-size: 11px; color: {close_color}; font-weight: bold;")
+            close_lbl.setWordWrap(True)
+            layout.addWidget(close_lbl)
 
         if self.job.pm_comments:
             sep4 = QFrame()
@@ -194,6 +215,7 @@ class DailyReportWindow(QWidget):
 
         self._build_header(layout)
         self._build_summary(layout)
+        self._build_coordination(layout)
         self._build_kanban(layout)
 
         btn_row = QHBoxLayout()
@@ -308,6 +330,79 @@ class DailyReportWindow(QWidget):
         if labels:
             labels[0].setText(value)
 
+    def _build_coordination(self, layout: QVBoxLayout):
+        box = QGroupBox("协调会摘要（项目经理重点关注）")
+        box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; font-size: 14px;
+                border: 2px solid #8e44ad; border-radius: 8px;
+                margin-top: 8px; padding: 14px 12px 10px 12px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #8e44ad; }
+        """)
+        box_layout = QHBoxLayout(box)
+        box_layout.setSpacing(10)
+
+        self.coord_client_col = self._make_coord_column("👤 需客户安全员到场", "#8e44ad")
+        self.coord_close_col = self._make_coord_column("⏰ 预计今天关闭", "#2980b9")
+        self.coord_overdue_col = self._make_coord_column("🚨 超时未关闭", "#e74c3c")
+
+        box_layout.addWidget(self.coord_client_col, 1)
+        box_layout.addWidget(self.coord_close_col, 1)
+        box_layout.addWidget(self.coord_overdue_col, 1)
+
+        layout.addWidget(box)
+
+    def _make_coord_column(self, title: str, color: str) -> QFrame:
+        col = QFrame()
+        col.setStyleSheet(f"""
+            QFrame {{
+                background: #fafafa;
+                border: 1px solid #ecf0f1;
+                border-top: 3px solid {color};
+                border-radius: 6px;
+            }}
+        """)
+        v = QVBoxLayout(col)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(4)
+        t = QLabel(title)
+        t.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {color};")
+        v.addWidget(t)
+
+        content = QVBoxLayout()
+        content.setSpacing(3)
+        content.addStretch(1)
+        v.addLayout(content, 1)
+        setattr(col, "_content_layout", content)
+
+        count_lbl = QLabel("共 0 项")
+        count_lbl.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: bold;")
+        v.addWidget(count_lbl)
+        setattr(col, "_count_label", count_lbl)
+        return col
+
+    def _fill_coord_column(self, col: QFrame, jobs: list, color: str):
+        cl = getattr(col, "_content_layout")
+        while cl.count() > 1:
+            it = cl.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        for job in jobs:
+            est_str = job.estimated_end_time.strftime("%H:%M") if job.estimated_end_time else "-"
+            risk_color = RISK_COLORS.get(job.risk_level, "#34495e")
+            lbl = QLabel(
+                f"<span style='color:{risk_color}'>●</span> <b>{job.work_type}</b><br>"
+                f"<span style='color:#7f8c8d'>{job.work_location} · {job.aircraft_no}</span><br>"
+                f"<span style='color:{color}'>预计 {est_str} · {job.team_leader}</span>"
+            )
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setStyleSheet("font-size: 11px; padding: 4px 5px; background: white; border-radius: 3px;")
+            lbl.setWordWrap(True)
+            cl.insertWidget(cl.count() - 1, lbl)
+        getattr(col, "_count_label").setText(f"共 {len(jobs)} 项")
+
     def _build_kanban(self, layout: QVBoxLayout):
         kanban_container = QWidget()
         kanban_layout = QHBoxLayout(kanban_container)
@@ -385,6 +480,11 @@ class DailyReportWindow(QWidget):
         self._clear_cards()
         jobs = self.db.get_risk_jobs(project_id=self.project.id, job_date=self.job_date)
 
+        client_jobs = []
+        close_today_jobs = []
+        overdue_jobs = []
+        now = datetime.now()
+
         total = len(jobs)
         counts = {s: 0 for s in JOB_STATUSES}
         issue_count = 0
@@ -393,11 +493,26 @@ class DailyReportWindow(QWidget):
             counts[job.status] = counts.get(job.status, 0) + 1
             if job.issues:
                 issue_count += 1
+
+            if job.need_client_safety_officer and job.status != "已关闭":
+                client_jobs.append(job)
+
+            if job.status == "进行中" and job.estimated_end_time:
+                if job.estimated_end_time.date() == self.job_date:
+                    close_today_jobs.append(job)
+                if job.estimated_end_time < now:
+                    overdue_jobs.append(job)
+
             personnel = self.db.get_personnel_by_ids(job.personnel_ids)
-            card = RiskCard(job, personnel)
+            is_overdue_closed = self.db.is_overdue_closed(job)
+            card = RiskCard(job, personnel, is_overdue_closed)
             layout = self.cards_layouts.get(job.status)
             if layout:
                 layout.insertWidget(layout.count() - 1, card)
+
+        self._fill_coord_column(self.coord_client_col, client_jobs, "#8e44ad")
+        self._fill_coord_column(self.coord_close_col, close_today_jobs, "#2980b9")
+        self._fill_coord_column(self.coord_overdue_col, overdue_jobs, "#e74c3c")
 
         self._update_summary_card(self.card_total, str(total))
         self._update_summary_card(self.card_pending, str(counts.get("未开工", 0)))

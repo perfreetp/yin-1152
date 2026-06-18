@@ -26,6 +26,12 @@ JOB_STATUSES = ["未开工", "进行中", "已关闭"]
 PERMIT_STATUSES = ["有效", "即将过期", "已过期", "未办理"]
 
 
+PERMIT_WARNING_DAYS = 3
+
+
+CERT_WARNING_DAYS = 30
+
+
 @dataclass
 class Airline:
     id: Optional[int] = None
@@ -61,6 +67,25 @@ class Personnel:
 
 
 @dataclass
+class PersonnelQualification:
+    id: Optional[int] = None
+    personnel_id: Optional[int] = None
+    work_type: str = ""
+    certificate_no: str = ""
+    expiry_date: Optional[date] = None
+
+
+@dataclass
+class QualificationIssue:
+    personnel_id: int
+    personnel_name: str
+    issue_type: str
+    work_type: str
+    detail: str
+
+
+
+@dataclass
 class RiskJob:
     id: Optional[int] = None
     project_id: Optional[int] = None
@@ -78,6 +103,7 @@ class RiskJob:
     personnel_ids: List[int] = field(default_factory=list)
     estimated_end_time: Optional[datetime] = None
     actual_end_time: Optional[datetime] = None
+    close_remark: str = ""
     status: str = "未开工"
     need_client_safety_officer: bool = False
     reviewed_by_pm: bool = False
