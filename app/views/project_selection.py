@@ -1,0 +1,321 @@
+from datetime import date
+from typing import Optional
+
+from PySide6.QtCore import Qt, QDate, Signal
+from PySide6.QtWidgets import (
+    QWidget, QLabel, QComboBox, QDateEdit, QPushButton, QVBoxLayout,
+    QHBoxLayout, QGroupBox, QListWidget, QListWidgetItem, QFrame, QMessageBox
+)
+
+from app.db.database import Database
+from app.models.schemas import ContractProject, WORK_TYPES, RISK_LEVELS, JOB_STATUSES
+from app.views.risk_entry import RiskEntryWindow
+from app.views.daily_report import DailyReportWindow
+
+
+RISK_COLORS = {
+    "低风险": "#27ae60",
+    "中风险": "#f39c12",
+    "高风险": "#e67e22",
+    "极高风险": "#c0392b",
+}
+
+
+class ProjectSelectionWindow(QWidget):
+    def __init__(self, db: Database):
+        super().__init__()
+        self.db = db
+        self.current_project: Optional[ContractProject] = None
+        self.current_date: date = date.today()
+        self.risk_entry_window: Optional[RiskEntryWindow] = None
+        self.report_window: Optional[DailyReportWindow] = None
+        self._init_ui()
+        self._load_airlines()
+        self._load_bases()
+        self._refresh_job_list()
+
+    def _init_ui(self):
+        self.setWindowTitle("民航维修现场风险日报系统 - 项目选择")
+        self.setMinimumSize(1000, 650)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        title = QLabel("民航维修现场风险日报系统")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #2c3e50;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        sub = QLabel("承包商项目经理专用 · 每日风险协调看板")
+        sub.setStyleSheet("font-size: 13px; color: #7f8c8d;")
+        sub.setAlignment(Qt.AlignCenter)
+        layout.addWidget(sub)
+
+        filter_box = QGroupBox("筛选条件")
+        filter_box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; font-size: 14px;
+                border: 1px solid #bdc3c7; border-radius: 8px;
+                margin-top: 10px; padding: 15px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 15px; padding: 0 5px; }
+        """)
+        filter_layout = QHBoxLayout(filter_box)
+        filter_layout.setSpacing(15)
+
+        self.airline_combo = QComboBox()
+        self.base_combo = QComboBox()
+        self.project_combo = QComboBox()
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setDate(QDate.currentDate())
+
+        for label_text, widget in [
+            ("客户航司", self.airline_combo),
+            ("维修基地", self.base_combo),
+            ("合同项目", self.project_combo),
+            ("作业日期", self.date_edit),
+        ]:
+            col = QVBoxLayout()
+            lab = QLabel(label_text)
+            lab.setStyleSheet("font-size: 12px; color: #34495e; margin-bottom: 3px;")
+            col.addWidget(lab)
+            widget.setMinimumHeight(32)
+            widget.setStyleSheet("QComboBox, QDateEdit { padding: 4px 8px; }")
+            col.addWidget(widget)
+            filter_layout.addLayout(col)
+
+        self.btn_search = QPushButton("查看今日风险")
+        self.btn_search.setMinimumHeight(40)
+        self.btn_search.setStyleSheet("""
+            QPushButton {
+                background: #2980b9; color: white; font-weight: bold;
+                border: none; border-radius: 6px; padding: 0 20px;
+            }
+            QPushButton:hover { background: #3498db; }
+            QPushButton:pressed { background: #1f6391; }
+        """)
+        btn_col = QVBoxLayout()
+        btn_col.addSpacing(18)
+        btn_col.addWidget(self.btn_search)
+        filter_layout.addLayout(btn_col)
+
+        layout.addWidget(filter_box)
+
+        self.airline_combo.currentIndexChanged.connect(self._on_filter_changed)
+        self.base_combo.currentIndexChanged.connect(self._on_filter_changed)
+        self.project_combo.currentIndexChanged.connect(self._on_project_changed)
+        self.date_edit.dateChanged.connect(self._on_date_changed)
+        self.btn_search.clicked.connect(self._on_search)
+
+        content = QHBoxLayout()
+        content.setSpacing(15)
+
+        left = QVBoxLayout()
+        list_title = QLabel("今日高风险作业列表")
+        list_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50;")
+        left.addWidget(list_title)
+
+        self.job_list = QListWidget()
+        self.job_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #bdc3c7; border-radius: 6px;
+                background: white; padding: 4px;
+            }
+            QListWidget::item {
+                padding: 10px; border-radius: 4px; margin: 2px 0;
+                border-bottom: 1px solid #ecf0f1;
+            }
+            QListWidget::item:selected { background: #e8f4fc; }
+        """)
+        left.addWidget(self.job_list, 1)
+
+        btn_row = QHBoxLayout()
+        self.btn_fill = QPushButton("风险填报 / 审核")
+        self.btn_fill.setMinimumHeight(38)
+        self.btn_fill.setStyleSheet("""
+            QPushButton {
+                background: #27ae60; color: white; font-weight: bold;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background: #2ecc71; }
+            QPushButton:disabled { background: #95a5a6; }
+        """)
+        self.btn_fill.clicked.connect(self._open_risk_entry)
+        btn_row.addWidget(self.btn_fill)
+
+        self.btn_report = QPushButton("生成日报")
+        self.btn_report.setMinimumHeight(38)
+        self.btn_report.setStyleSheet("""
+            QPushButton {
+                background: #8e44ad; color: white; font-weight: bold;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background: #9b59b6; }
+            QPushButton:disabled { background: #95a5a6; }
+        """)
+        self.btn_report.clicked.connect(self._open_daily_report)
+        btn_row.addWidget(self.btn_report)
+        left.addLayout(btn_row)
+
+        content.addLayout(left, 2)
+
+        right = QVBoxLayout()
+
+        summary_box = QGroupBox("今日概览")
+        summary_box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; font-size: 14px;
+                border: 1px solid #bdc3c7; border-radius: 8px;
+                margin-top: 10px; padding: 15px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 15px; padding: 0 5px; }
+        """)
+        summary_layout = QVBoxLayout(summary_box)
+
+        self.lbl_total = QLabel("风险作业总数：0")
+        self.lbl_pending = QLabel("未开工：0")
+        self.lbl_doing = QLabel("进行中：0")
+        self.lbl_closed = QLabel("已关闭：0")
+        self.lbl_issues = QLabel("存在问题：0")
+
+        for lbl in [self.lbl_total, self.lbl_pending, self.lbl_doing, self.lbl_closed, self.lbl_issues]:
+            lbl.setStyleSheet("font-size: 14px; padding: 6px 0;")
+            summary_layout.addWidget(lbl)
+
+        self.lbl_issues.setStyleSheet("font-size: 14px; padding: 6px 0; color: #c0392b; font-weight: bold;")
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet("color: #ecf0f1;")
+        summary_layout.addWidget(separator)
+
+        hint = QLabel("提示：\n1. 先选择客户航司、基地与项目\n2. 点击「风险填报/审核」录入或审核作业\n3. 点击「生成日报」输出协调会看板")
+        hint.setStyleSheet("font-size: 12px; color: #7f8c8d; line-height: 1.6;")
+        hint.setWordWrap(True)
+        summary_layout.addWidget(hint)
+
+        right.addWidget(summary_box)
+        right.addStretch(1)
+        content.addLayout(right, 1)
+
+        layout.addLayout(content, 1)
+
+        self._update_buttons_state()
+
+    def _load_airlines(self):
+        airlines = self.db.get_all_airlines()
+        self.airline_combo.clear()
+        self.airline_combo.addItem("全部航司", None)
+        for a in airlines:
+            self.airline_combo.addItem(a.name, a.id)
+
+    def _load_bases(self):
+        bases = self.db.get_all_bases()
+        self.base_combo.clear()
+        self.base_combo.addItem("全部基地", None)
+        for b in bases:
+            self.base_combo.addItem(b.name, b.id)
+
+    def _load_projects(self):
+        airline_id = self.airline_combo.currentData()
+        base_id = self.base_combo.currentData()
+        projects = self.db.get_projects(airline_id, base_id)
+        self.project_combo.clear()
+        self.project_combo.addItem("-- 请选择合同项目 --", None)
+        for p in projects:
+            self.project_combo.addItem(f"{p.name} ({p.contract_no})", p.id)
+
+    def _on_filter_changed(self):
+        self._load_projects()
+        self._refresh_job_list()
+
+    def _on_project_changed(self):
+        project_id = self.project_combo.currentData()
+        if project_id:
+            projects = self.db.get_projects()
+            for p in projects:
+                if p.id == project_id:
+                    self.current_project = p
+                    break
+        else:
+            self.current_project = None
+        self._refresh_job_list()
+        self._update_buttons_state()
+
+    def _on_date_changed(self, qdate: QDate):
+        self.current_date = date(qdate.year(), qdate.month(), qdate.day())
+        self._refresh_job_list()
+
+    def _on_search(self):
+        self._refresh_job_list()
+
+    def _refresh_job_list(self):
+        self.job_list.clear()
+
+        project_id = self.project_combo.currentData()
+        if not project_id:
+            self._update_summary(None)
+            return
+
+        jobs = self.db.get_risk_jobs(project_id=project_id, job_date=self.current_date)
+        for job in jobs:
+            item = QListWidgetItem()
+            color = RISK_COLORS.get(job.risk_level, "#34495e")
+            status_icon = {"未开工": "⏳", "进行中": "🔄", "已关闭": "✅"}.get(job.status, "•")
+            issue_tag = " ⚠" if job.issues else ""
+            client_tag = " 👤" if job.need_client_safety_officer else ""
+            item.setText(
+                f"{status_icon} [{job.risk_level}] {job.work_type} "
+                f"- {job.work_location} ({job.aircraft_no}){issue_tag}{client_tag}\n"
+                f"    班组：{job.team} | 负责人：{job.team_leader}"
+                f"{' | 未审核' if not job.reviewed_by_pm else ''}"
+            )
+            item.setForeground(Qt.black)
+            item.setData(Qt.UserRole, job.id)
+            self.job_list.addItem(item)
+
+        self._update_summary(jobs)
+
+    def _update_summary(self, jobs):
+        if not jobs:
+            self.lbl_total.setText("风险作业总数：0")
+            self.lbl_pending.setText("未开工：0")
+            self.lbl_doing.setText("进行中：0")
+            self.lbl_closed.setText("已关闭：0")
+            self.lbl_issues.setText("存在问题：0")
+            return
+
+        total = len(jobs)
+        pending = sum(1 for j in jobs if j.status == "未开工")
+        doing = sum(1 for j in jobs if j.status == "进行中")
+        closed = sum(1 for j in jobs if j.status == "已关闭")
+        issues = sum(1 for j in jobs if j.issues)
+
+        self.lbl_total.setText(f"风险作业总数：{total}")
+        self.lbl_pending.setText(f"未开工：{pending}")
+        self.lbl_doing.setText(f"进行中：{doing}")
+        self.lbl_closed.setText(f"已关闭：{closed}")
+        self.lbl_issues.setText(f"存在问题：{issues}")
+
+    def _update_buttons_state(self):
+        has_project = self.current_project is not None
+        self.btn_fill.setEnabled(has_project)
+        self.btn_report.setEnabled(has_project)
+
+    def _open_risk_entry(self):
+        if not self.current_project:
+            QMessageBox.warning(self, "提示", "请先选择合同项目")
+            return
+        self.risk_entry_window = RiskEntryWindow(self.db, self.current_project, self.current_date)
+        self.risk_entry_window.jobs_updated.connect(self._refresh_job_list)
+        self.risk_entry_window.show()
+
+    def _open_daily_report(self):
+        if not self.current_project:
+            QMessageBox.warning(self, "提示", "请先选择合同项目")
+            return
+        self.report_window = DailyReportWindow(self.db, self.current_project, self.current_date)
+        self.report_window.show()
