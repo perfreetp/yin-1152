@@ -321,6 +321,19 @@ class DailyReportWindow(QWidget):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
 
+        self.btn_detail = QPushButton("📋 闭环明细")
+        self.btn_detail.setMinimumHeight(38)
+        self.btn_detail.setMinimumWidth(130)
+        self.btn_detail.setStyleSheet("""
+            QPushButton {
+                background: #d35400; color: white; font-weight: bold;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background: #e67e22; }
+        """)
+        self.btn_detail.clicked.connect(self._open_closed_loop_detail)
+        btn_row.addWidget(self.btn_detail)
+
         self.btn_refresh = QPushButton("🔄 刷新数据")
         self.btn_refresh.setMinimumHeight(38)
         self.btn_refresh.setMinimumWidth(130)
@@ -742,6 +755,11 @@ class DailyReportWindow(QWidget):
         exporter = DailyReportExporter(self.db, self.project, self.job_date, jobs, self)
         exporter.export_excel()
 
+    def _open_closed_loop_detail(self):
+        jobs = self.db.get_risk_jobs(project_id=self.project.id, job_date=self.job_date)
+        dlg = ClosedLoopDetailWindow(self.db, self.project, self.job_date, jobs, self)
+        dlg.exec()
+
     def _on_print(self):
         QMessageBox.information(self, "提示", "请使用「导出 PDF」或「导出 Excel」功能保存日报。")
 
@@ -769,14 +787,15 @@ class FollowUpDialog(QDialog):
         header.setStyleSheet("font-size: 13px; color: #34495e; padding: 6px;")
         layout.addWidget(header)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ["时间", "跟进人", "跟进动作", "复查日期", "复查结果", "闭环确认", "操作"])
+            ["选", "时间", "跟进人", "跟进动作", "复查日期", "复查结果", "闭环确认", "操作"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -849,6 +868,30 @@ class FollowUpDialog(QDialog):
         btn_add.clicked.connect(self._add_record)
         btn_row.addWidget(btn_add)
 
+        btn_batch = QPushButton("✅ 批量确认选中")
+        btn_batch.setMinimumHeight(36)
+        btn_batch.setMinimumWidth(140)
+        btn_batch.setStyleSheet("""
+            QPushButton { background: #8e44ad; color: white; font-weight: bold;
+                          border: none; border-radius: 6px; }
+            QPushButton:hover { background: #9b59b6; }
+            QPushButton:disabled { background: #95a5a6; }
+        """)
+        btn_batch.clicked.connect(self._batch_confirm)
+        btn_row.addWidget(btn_batch)
+        self.btn_batch_confirm = btn_batch
+
+        btn_sel_pending = QPushButton("选待确认")
+        btn_sel_pending.setMinimumHeight(36)
+        btn_sel_pending.setMinimumWidth(90)
+        btn_sel_pending.setStyleSheet("""
+            QPushButton { background: #7f8c8d; color: white; font-weight: bold;
+                          border: none; border-radius: 6px; }
+            QPushButton:hover { background: #95a5a6; }
+        """)
+        btn_sel_pending.clicked.connect(self._select_all_pending)
+        btn_row.addWidget(btn_sel_pending)
+
         btn_box = QDialogButtonBox(QDialogButtonBox.Close)
         btn_close = btn_box.button(QDialogButtonBox.Close)
         btn_close.setText("✅ 完成")
@@ -868,14 +911,19 @@ class FollowUpDialog(QDialog):
     def _refresh_table(self):
         fus = self.db.get_follow_ups_by_job(self.job.id or 0)
         self.table.setRowCount(len(fus))
+        self._current_fus = fus
         for r, fu in enumerate(fus):
-            self.table.setItem(r, 0, QTableWidgetItem(
+            chk = QCheckBox()
+            chk.setEnabled(not fu.confirmed)
+            chk.setStyleSheet("QCheckBox { margin-left: 8px; }")
+            self.table.setCellWidget(r, 0, chk)
+            self.table.setItem(r, 1, QTableWidgetItem(
                 fu.follow_time.strftime("%Y-%m-%d %H:%M") if fu.follow_time else "-"))
-            self.table.setItem(r, 1, QTableWidgetItem(fu.owner or "-"))
-            self.table.setItem(r, 2, QTableWidgetItem(fu.action or "-"))
-            self.table.setItem(r, 3, QTableWidgetItem(
+            self.table.setItem(r, 2, QTableWidgetItem(fu.owner or "-"))
+            self.table.setItem(r, 3, QTableWidgetItem(fu.action or "-"))
+            self.table.setItem(r, 4, QTableWidgetItem(
                 fu.review_date.isoformat() if fu.review_date else "-"))
-            self.table.setItem(r, 4, QTableWidgetItem(fu.result or "-"))
+            self.table.setItem(r, 5, QTableWidgetItem(fu.result or "-"))
             if fu.confirmed:
                 text = f"✅ {fu.confirmed_by or '-'}"
                 if fu.confirmed_at:
@@ -886,7 +934,7 @@ class FollowUpDialog(QDialog):
             else:
                 item = QTableWidgetItem("⏳ 待确认")
                 item.setBackground(QBrush(QColor("#fef9e7")))
-            self.table.setItem(r, 5, item)
+            self.table.setItem(r, 6, item)
 
             btn_del = QPushButton("🗑 删除")
             btn_del.setCursor(Qt.PointingHandCursor)
@@ -897,7 +945,7 @@ class FollowUpDialog(QDialog):
                 QPushButton:hover { background: #f1948a; color: white; }
             """)
             btn_del.clicked.connect(lambda _=False, fid=fu.id: self._delete_record(fid))
-            self.table.setCellWidget(r, 6, btn_del)
+            self.table.setCellWidget(r, 7, btn_del)
             self.table.setRowHeight(r, 46)
 
     def _add_record(self):
@@ -930,3 +978,606 @@ class FollowUpDialog(QDialog):
         if QMessageBox.question(self, "确认", "确认删除此条跟进记录？") == QMessageBox.Yes:
             self.db.delete_follow_up(fid)
             self._refresh_table()
+
+    def _select_all_pending(self):
+        fus = getattr(self, "_current_fus", [])
+        for r, fu in enumerate(fus):
+            chk = self.table.cellWidget(r, 0)
+            if chk and chk.isEnabled():
+                chk.setChecked(True)
+
+    def _batch_confirm(self):
+        fus = getattr(self, "_current_fus", [])
+        selected_ids = []
+        for r, fu in enumerate(fus):
+            chk = self.table.cellWidget(r, 0)
+            if chk and chk.isChecked() and not fu.confirmed:
+                selected_ids.append(fu.id)
+        if not selected_ids:
+            QMessageBox.information(self, "提示", "请勾选至少一条待确认的跟进记录")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"批量确认跟进记录（共 {len(selected_ids)} 条）")
+        dlg.setMinimumWidth(460)
+        dlg.setStyleSheet("background: #f5f6fa;")
+        v = QVBoxLayout(dlg)
+        v.setSpacing(10)
+
+        tip = QLabel(f"将把选中的 {len(selected_ids)} 条待确认跟进标记为已确认闭环")
+        tip.setStyleSheet("color: #2c3e50; font-weight: bold; padding: 4px;")
+        v.addWidget(tip)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        e_confirmer = QLineEdit()
+        e_confirmer.setPlaceholderText("例如：项目经理")
+        e_remark = QTextEdit()
+        e_remark.setPlaceholderText("确认说明（批量填写结果，例如「复盘会现场确认闭环」），留空则保留原结果")
+        e_remark.setMinimumHeight(70)
+        form.addRow("确认人：", e_confirmer)
+        form.addRow("确认说明：", e_remark)
+        v.addLayout(form)
+
+        btn_bar = QHBoxLayout()
+        btn_bar.addStretch(1)
+        btn_ok = QPushButton("💾 批量保存")
+        btn_ok.setMinimumHeight(36)
+        btn_ok.setStyleSheet("""
+            QPushButton { background: #27ae60; color: white; font-weight: bold;
+                          border: none; border-radius: 6px; padding: 0 18px; }
+            QPushButton:hover { background: #2ecc71; }
+        """)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setMinimumHeight(36)
+        btn_cancel.setStyleSheet("""
+            QPushButton { background: #95a5a6; color: white; font-weight: bold;
+                          border: none; border-radius: 6px; padding: 0 16px; }
+            QPushButton:hover { background: #7f8c8d; }
+        """)
+        btn_bar.addWidget(btn_cancel)
+        btn_bar.addWidget(btn_ok)
+        v.addLayout(btn_bar)
+
+        def do_save():
+            confirmer = e_confirmer.text().strip()
+            remark = e_remark.toPlainText().strip()
+            if not confirmer:
+                QMessageBox.warning(dlg, "提示", "请填写「确认人」")
+                return
+            cnt = 0
+            for fid in selected_ids:
+                all_fus = self.db.get_follow_ups_by_job(self.job.id or 0)
+                fu = next((f for f in all_fus if f.id == fid), None)
+                if not fu or fu.confirmed:
+                    continue
+                fu.confirmed = True
+                fu.confirmed_by = confirmer
+                fu.confirmed_at = datetime.now()
+                if remark:
+                    fu.result = remark if not fu.result else fu.result + "；" + remark
+                self.db.save_follow_up(fu)
+                cnt += 1
+            QMessageBox.information(dlg, "成功", f"已批量确认 {cnt} 条跟进记录")
+            dlg.accept()
+
+        btn_ok.clicked.connect(do_save)
+        btn_cancel.clicked.connect(dlg.reject)
+        if dlg.exec() == QDialog.Accepted:
+            self._refresh_table()
+
+
+class ClosedLoopDetailWindow(QDialog):
+    """按风险作业查看的闭环明细页 —— 复盘会逐条过用"""
+
+    def __init__(self, db: Database, project: ContractProject, job_date: date,
+                 jobs: List[RiskJob], parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.project = project
+        self.job_date = job_date
+        self.all_jobs = jobs
+        self.current_job_id: Optional[int] = None
+        self.setWindowTitle(f"闭环明细复盘 - {project.name} ({job_date.isoformat()})")
+        self.setMinimumSize(1200, 780)
+        self.setStyleSheet("background: #f5f6fa;")
+        self._init_ui()
+        self._reload_jobs()
+        if self.all_jobs:
+            self._select_job(self.all_jobs[0].id)
+
+    def _init_ui(self):
+        root = QHBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        # 左侧：作业列表
+        left = QFrame()
+        left.setFixedWidth(320)
+        left.setStyleSheet("""
+            QFrame { background: white; border: 1px solid #bdc3c7; border-radius: 6px; }
+        """)
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(8, 8, 8, 8)
+        lv.setSpacing(6)
+
+        head = QVBoxLayout()
+        h1 = QLabel("📚 风险作业列表")
+        h1.setStyleSheet("font-size: 14px; font-weight: bold; color: #2c3e50;")
+        head.addWidget(h1)
+        h2 = QLabel(f"共 {len(self.all_jobs)} 条，点击左侧查看明细")
+        h2.setStyleSheet("font-size: 11px; color: #7f8c8d;")
+        head.addWidget(h2)
+
+        # 状态筛选
+        filter_row = QHBoxLayout()
+        self.filter_group = QButtonGroup(self)
+        self.filter_group.setExclusive(True)
+        for key, label in [("all", "全部"), ("doing", "进行中"),
+                           ("closed", "已关闭"), ("issue", "有问题"),
+                           ("pending_fu", "待确认跟进")]:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(26)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #f8f9fa; color: #34495e;
+                    border: 1px solid #bdc3c7; border-radius: 4px;
+                    padding: 2px 6px; font-size: 10px; font-weight: bold;
+                }
+                QPushButton:hover { background: #e9ecef; }
+                QPushButton:checked { background: #2980b9; color: white; border: 1px solid #2980b9; }
+            """)
+            btn.clicked.connect(lambda _=False, k=key: self._apply_filter(k))
+            self.filter_group.addButton(btn)
+            filter_row.addWidget(btn)
+            if key == "all":
+                btn.setChecked(True)
+        head.addLayout(filter_row)
+        lv.addLayout(head)
+
+        self.job_list = QListWidget()
+        self.job_list.setStyleSheet("""
+            QListWidget {
+                background: white; border: none; font-size: 12px; outline: none;
+            }
+            QListWidget::item {
+                padding: 7px 8px; margin: 2px 2px; border-radius: 4px;
+                border-left: 3px solid #bdc3c7;
+            }
+            QListWidget::item:selected {
+                background: #eaf2f8; border-left: 3px solid #2980b9; color: #2c3e50;
+            }
+        """)
+        self.job_list.currentItemChanged.connect(self._on_job_selected)
+        lv.addWidget(self.job_list, 1)
+
+        stat_lbl = QLabel("💡 选中作业后可在右侧查看跟进链和批量确认")
+        stat_lbl.setStyleSheet("color: #7f8c8d; font-size: 10px; padding: 2px;")
+        stat_lbl.setWordWrap(True)
+        lv.addWidget(stat_lbl)
+
+        root.addWidget(left)
+
+        # 右侧：作业详情
+        right = QFrame()
+        right.setStyleSheet("background: white; border: 1px solid #bdc3c7; border-radius: 6px;")
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(14, 14, 14, 14)
+        rv.setSpacing(10)
+
+        self.right_title = QLabel("（请在左侧选择作业）")
+        self.right_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+        rv.addWidget(self.right_title)
+
+        self.right_sub = QLabel("")
+        self.right_sub.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+        rv.addWidget(self.right_sub)
+
+        self.right_tags = QHBoxLayout()
+        rv.addLayout(self.right_tags)
+
+        # 基本信息 + 跟进的分组
+        self.detail_stack = QWidget()
+        rv.addWidget(self.detail_stack, 1)
+
+        detail_v = QVBoxLayout(self.detail_stack)
+        detail_v.setContentsMargins(0, 0, 0, 0)
+        detail_v.setSpacing(8)
+
+        info_box = QGroupBox("🔧 基本信息 / 问题 / 关闭")
+        info_box.setStyleSheet("""
+            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #bdc3c7;
+                        border-radius: 5px; margin-top: 8px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+        """)
+        self.info_form = QFormLayout(info_box)
+        self.info_form.setHorizontalSpacing(16)
+        self.info_form.setVerticalSpacing(6)
+        detail_v.addWidget(info_box)
+
+        follow_box = QGroupBox("📎 跟进记录链（可多选后批量确认）")
+        follow_box.setStyleSheet("""
+            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #8e44ad;
+                        border-radius: 5px; margin-top: 8px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #8e44ad; }
+        """)
+        fb_v = QVBoxLayout(follow_box)
+        fb_v.setSpacing(6)
+
+        tool_row = QHBoxLayout()
+        self.btn_select_pending = QPushButton("🔘 全选待确认")
+        self.btn_select_pending.setMinimumHeight(30)
+        self.btn_select_pending.setStyleSheet("""
+            QPushButton { background: #7f8c8d; color: white; font-weight: bold;
+                          border: none; border-radius: 4px; padding: 0 10px; font-size: 11px; }
+            QPushButton:hover { background: #95a5a6; }
+        """)
+        self.btn_select_pending.clicked.connect(self._sel_all_pending_fus)
+        tool_row.addWidget(self.btn_select_pending)
+
+        self.btn_batch_confirm = QPushButton("✅ 批量标记闭环")
+        self.btn_batch_confirm.setMinimumHeight(30)
+        self.btn_batch_confirm.setStyleSheet("""
+            QPushButton { background: #8e44ad; color: white; font-weight: bold;
+                          border: none; border-radius: 4px; padding: 0 14px; font-size: 11px; }
+            QPushButton:hover { background: #9b59b6; }
+        """)
+        self.btn_batch_confirm.clicked.connect(self._batch_confirm_fus)
+        tool_row.addWidget(self.btn_batch_confirm)
+
+        self.btn_new_fu = QPushButton("➕ 新增跟进")
+        self.btn_new_fu.setMinimumHeight(30)
+        self.btn_new_fu.setStyleSheet("""
+            QPushButton { background: #2980b9; color: white; font-weight: bold;
+                          border: none; border-radius: 4px; padding: 0 12px; font-size: 11px; }
+            QPushButton:hover { background: #3498db; }
+        """)
+        self.btn_new_fu.clicked.connect(self._new_follow_up)
+        tool_row.addWidget(self.btn_new_fu)
+
+        tool_row.addStretch(1)
+        self.lbl_fu_summary = QLabel("")
+        self.lbl_fu_summary.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        tool_row.addWidget(self.lbl_fu_summary)
+        fb_v.addLayout(tool_row)
+
+        self.fu_table = QTableWidget(0, 8)
+        self.fu_table.setHorizontalHeaderLabels(
+            ["选", "时间", "跟进人", "跟进动作", "复查日期", "复查结果", "闭环确认", "操作"])
+        self.fu_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.fu_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.fu_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.fu_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.fu_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.fu_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.fu_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.fu_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.fu_table.setAlternatingRowColors(True)
+        self.fu_table.setStyleSheet("""
+            QTableWidget { background: white; border: 1px solid #bdc3c7; gridline-color: #ecf0f1; font-size: 11px; }
+            QHeaderView::section { background: #34495e; color: white; padding: 5px; font-weight: bold; border: none; }
+        """)
+        fb_v.addWidget(self.fu_table, 1)
+
+        detail_v.addWidget(follow_box, 1)
+
+        root.addWidget(right, 1)
+
+        # 底部按钮
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        btn_close = QPushButton("✔ 关闭")
+        btn_close.setMinimumHeight(36)
+        btn_close.setMinimumWidth(110)
+        btn_close.setStyleSheet("""
+            QPushButton { background: #27ae60; color: white; font-weight: bold;
+                          border: none; border-radius: 6px; }
+            QPushButton:hover { background: #2ecc71; }
+        """)
+        btn_close.clicked.connect(self.accept)
+        bottom.addWidget(btn_close)
+        rv.addLayout(bottom)
+
+    # ---- 作业列表 & 筛选 ----
+    def _reload_jobs(self):
+        self.all_jobs = self.db.get_risk_jobs(project_id=self.project.id, job_date=self.job_date)
+        self._apply_filter(getattr(self, "_current_filter", "all"))
+
+    def _apply_filter(self, key: str):
+        self._current_filter = key
+        now = datetime.now()
+        filtered = list(self.all_jobs)
+        if key == "doing":
+            filtered = [j for j in filtered if j.status == "进行中"]
+        elif key == "closed":
+            filtered = [j for j in filtered if j.status == "已关闭"]
+        elif key == "issue":
+            filtered = [j for j in filtered if j.issues]
+        elif key == "pending_fu":
+            result = []
+            for j in filtered:
+                fus = self.db.get_follow_ups_by_job(j.id or 0)
+                if any(not f.confirmed for f in fus):
+                    result.append(j)
+            filtered = result
+
+        self.job_list.clear()
+        for j in filtered:
+            pending = 0
+            for f in self.db.get_follow_ups_by_job(j.id or 0):
+                if not f.confirmed:
+                    pending += 1
+            status_color = {"未开工": "#2980b9", "进行中": "#e67e22", "已关闭": "#27ae60"}.get(j.status, "#7f8c8d")
+            level_color = RISK_COLORS.get(j.risk_level, "#34495e")
+            mark = ""
+            if j.issues:
+                mark += " 🚨"
+            if pending:
+                mark += f" ⏳×{pending}"
+            if j.need_client_safety_officer and j.status != "已关闭":
+                mark += " 👤"
+
+            title = f"{j.work_type} · {j.work_location or '-'}"
+            sub = f"[{j.risk_level}] {j.status} | 负责人：{j.team_leader or '-'}{mark}"
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, j.id)
+            self.job_list.addItem(item)
+
+            w = QWidget()
+            wv = QVBoxLayout(w)
+            wv.setContentsMargins(4, 3, 4, 3)
+            wv.setSpacing(2)
+            t1 = QHBoxLayout()
+            l1 = QLabel(title)
+            l1.setStyleSheet("font-weight: bold; color: #2c3e50; font-size: 12px;")
+            t1.addWidget(l1)
+            t1.addStretch(1)
+            tag1 = QLabel(f"●{j.risk_level}")
+            tag1.setStyleSheet(f"color: {level_color}; font-weight: bold; font-size: 11px;")
+            t1.addWidget(tag1)
+            wv.addLayout(t1)
+            l2 = QLabel(sub)
+            l2.setStyleSheet(f"color: {status_color}; font-size: 10px;")
+            wv.addWidget(l2)
+            item.setSizeHint(w.sizeHint())
+            self.job_list.setItemWidget(item, w)
+
+    def _on_job_selected(self, cur, prev):
+        if cur is None:
+            return
+        jid = cur.data(Qt.UserRole)
+        self._select_job(jid)
+
+    def _select_job(self, job_id: int):
+        self.current_job_id = job_id
+        job = next((j for j in self.all_jobs if j.id == job_id), None)
+        if not job:
+            return
+        # 左侧列表同步选中
+        for i in range(self.job_list.count()):
+            it = self.job_list.item(i)
+            if it.data(Qt.UserRole) == job_id:
+                self.job_list.setCurrentItem(it)
+                break
+
+        # 渲染标题
+        status_color = {"未开工": "#2980b9", "进行中": "#e67e22", "已关闭": "#27ae60"}.get(job.status, "#7f8c8d")
+        self.right_title.setText(f"{job.work_type}")
+        self.right_sub.setText(
+            f"位置：{job.work_location or '-'}　|　机型：{job.aircraft_no or '-'}　|　"
+            f"班组：{job.team or '-'} / {job.team_leader or '-'}　|　许可证：{job.permit_status}"
+        )
+        # 清空旧标签
+        while self.right_tags.count():
+            item = self.right_tags.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        def add_tag(text, bg, fg="white"):
+            l = QLabel(text)
+            l.setStyleSheet(f"background: {bg}; color: {fg}; padding: 3px 10px; "
+                            f"border-radius: 10px; font-size: 11px; font-weight: bold;")
+            self.right_tags.addWidget(l)
+
+        add_tag(job.status, status_color)
+        add_tag(job.risk_level, RISK_COLORS.get(job.risk_level, "#34495e"))
+        if job.need_client_safety_officer:
+            add_tag("👤 客户安全员", "#8e44ad")
+        if job.issues:
+            add_tag("🚨 有问题", "#c0392b")
+        if job.status == "已关闭":
+            if self.db.is_overdue_closed(job):
+                add_tag("🔴 超时关闭", "#c0392b")
+            else:
+                add_tag("🟢 按时关闭", "#27ae60")
+        fus = self.db.get_follow_ups_by_job(job.id or 0)
+        pending = sum(1 for f in fus if not f.confirmed)
+        if pending > 0:
+            add_tag(f"⏳ 待确认 ×{pending}", "#f39c12")
+        self.right_tags.addStretch(1)
+
+        # 信息表单
+        while self.info_form.count():
+            it = self.info_form.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+
+        def add_row(label, value, value_color=None):
+            lb = QLabel(label + "：")
+            lb.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+            v = QLabel(str(value) if value else "—")
+            v.setWordWrap(True)
+            v.setStyleSheet(f"color: {value_color or '#2c3e50'}; font-size: 12px; font-weight: bold;")
+            self.info_form.addRow(lb, v)
+
+        add_row("作业位置", job.work_location)
+        add_row("机型/机号", job.aircraft_no)
+        add_row("风险描述", job.description)
+        add_row("隔离措施", job.isolation_measures)
+        issue_color = "#c0392b" if job.issues else None
+        add_row("⚠️ 问题提示", job.issues, issue_color)
+        pm_color = "#2980b9" if job.pm_comments else None
+        add_row("项目经理意见", job.pm_comments, pm_color)
+        add_row("许可证状态", job.permit_status, "#d35400" if job.permit_status in ("已过期", "即将过期") else None)
+        add_row("许可证到期", job.permit_expiry.isoformat() if job.permit_expiry else None)
+        est_str = job.estimated_end_time.strftime("%Y-%m-%d %H:%M") if job.estimated_end_time else None
+        add_row("预计结束", est_str)
+        if job.status == "已关闭":
+            act_str = job.actual_end_time.strftime("%Y-%m-%d %H:%M") if job.actual_end_time else None
+            c_color = "#c0392b" if self.db.is_overdue_closed(job) else "#27ae60"
+            add_row("实际结束", act_str, c_color)
+        cr_color = "#c0392b" if job.close_remark and "超时" in job.close_remark else None
+        add_row("🚪 关闭说明", job.close_remark, cr_color)
+        personnel_names = "、".join(p.name for p in self.db.get_personnel_by_ids(job.personnel_ids))
+        add_row("参与人员", personnel_names)
+        add_row("审核状态", "✅ 已审核" if job.reviewed_by_pm else "⏳ 待项目经理审核",
+                "#27ae60" if job.reviewed_by_pm else "#e67e22")
+
+        self._reload_fu_table()
+
+    # ---- 跟进表格 ----
+    def _reload_fu_table(self):
+        if not self.current_job_id:
+            return
+        fus = self.db.get_follow_ups_by_job(self.current_job_id)
+        self._current_fus = fus
+        self.fu_table.setRowCount(len(fus))
+        pending = 0
+        for r, fu in enumerate(fus):
+            if not fu.confirmed:
+                pending += 1
+            chk = QCheckBox()
+            chk.setEnabled(not fu.confirmed)
+            chk.setStyleSheet("QCheckBox { margin-left: 8px; }")
+            self.fu_table.setCellWidget(r, 0, chk)
+            self.fu_table.setItem(r, 1, QTableWidgetItem(
+                fu.follow_time.strftime("%Y-%m-%d %H:%M") if fu.follow_time else "-"))
+            self.fu_table.setItem(r, 2, QTableWidgetItem(fu.owner or "-"))
+            self.fu_table.setItem(r, 3, QTableWidgetItem(fu.action or "-"))
+            self.fu_table.setItem(r, 4, QTableWidgetItem(
+                fu.review_date.isoformat() if fu.review_date else "-"))
+            self.fu_table.setItem(r, 5, QTableWidgetItem(fu.result or "-"))
+            if fu.confirmed:
+                text = f"✅ {fu.confirmed_by or '-'}"
+                if fu.confirmed_at:
+                    text += f"\n{fu.confirmed_at.strftime('%m-%d %H:%M')}"
+                item = QTableWidgetItem(text)
+                item.setBackground(QBrush(QColor("#d5f5e3")))
+                item.setForeground(QBrush(QColor("#1e8449")))
+            else:
+                item = QTableWidgetItem("⏳ 待确认")
+                item.setBackground(QBrush(QColor("#fef9e7")))
+            self.fu_table.setItem(r, 6, item)
+
+            btn_del = QPushButton("🗑")
+            btn_del.setCursor(Qt.PointingHandCursor)
+            btn_del.setStyleSheet("""
+                QPushButton { background: #fadbd8; color: #c0392b;
+                              border: 1px solid #e6b0aa; border-radius: 3px;
+                              padding: 2px 8px; font-size: 10px; }
+                QPushButton:hover { background: #f1948a; color: white; }
+            """)
+            btn_del.clicked.connect(lambda _=False, fid=fu.id: self._delete_fu(fid))
+            self.fu_table.setCellWidget(r, 7, btn_del)
+            self.fu_table.setRowHeight(r, 40)
+
+        self.lbl_fu_summary.setText(f"共 {len(fus)} 条跟进，待确认 {pending} 条")
+
+    def _sel_all_pending_fus(self):
+        fus = getattr(self, "_current_fus", [])
+        for r, fu in enumerate(fus):
+            chk = self.fu_table.cellWidget(r, 0)
+            if chk and chk.isEnabled():
+                chk.setChecked(True)
+
+    def _batch_confirm_fus(self):
+        fus = getattr(self, "_current_fus", [])
+        selected_ids = []
+        for r, fu in enumerate(fus):
+            chk = self.fu_table.cellWidget(r, 0)
+            if chk and chk.isChecked() and not fu.confirmed:
+                selected_ids.append(fu.id)
+        if not selected_ids:
+            QMessageBox.information(self, "提示", "请勾选至少一条待确认的跟进")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"批量确认跟进（共 {len(selected_ids)} 条）")
+        dlg.setMinimumWidth(460)
+        dlg.setStyleSheet("background: #f5f6fa;")
+        v = QVBoxLayout(dlg); v.setSpacing(10)
+        tip = QLabel(f"为选中的 {len(selected_ids)} 条记录填写确认信息")
+        tip.setStyleSheet("font-weight: bold; color: #2c3e50; padding: 4px;")
+        v.addWidget(tip)
+        form = QFormLayout(); form.setSpacing(8)
+        e_confirmer = QLineEdit()
+        e_confirmer.setPlaceholderText("例如：项目经理 / 客户安全员")
+        e_remark = QTextEdit()
+        e_remark.setPlaceholderText("确认说明（例如「6.18 协调会确认闭环」），留空则沿用原结果")
+        e_remark.setMinimumHeight(70)
+        form.addRow("确认人：", e_confirmer)
+        form.addRow("确认说明：", e_remark)
+        v.addLayout(form)
+
+        bar = QHBoxLayout(); bar.addStretch(1)
+        b_ok = QPushButton("💾 批量保存")
+        b_ok.setMinimumHeight(36)
+        b_ok.setStyleSheet("QPushButton { background:#27ae60; color:white; font-weight:bold;"
+                           "border:none; border-radius:6px; padding:0 18px; }"
+                           "QPushButton:hover { background:#2ecc71; }")
+        b_cancel = QPushButton("取消")
+        b_cancel.setMinimumHeight(36)
+        b_cancel.setStyleSheet("QPushButton { background:#95a5a6; color:white; font-weight:bold;"
+                               "border:none; border-radius:6px; padding:0 16px; }"
+                               "QPushButton:hover { background:#7f8c8d; }")
+        bar.addWidget(b_cancel); bar.addWidget(b_ok)
+        v.addLayout(bar)
+
+        def save():
+            confirmer = e_confirmer.text().strip()
+            remark = e_remark.toPlainText().strip()
+            if not confirmer:
+                QMessageBox.warning(dlg, "提示", "请填写确认人")
+                return
+            cnt = 0
+            for fid in selected_ids:
+                all_fus = self.db.get_follow_ups_by_job(self.current_job_id)
+                fu = next((f for f in all_fus if f.id == fid), None)
+                if not fu or fu.confirmed:
+                    continue
+                fu.confirmed = True
+                fu.confirmed_by = confirmer
+                fu.confirmed_at = datetime.now()
+                if remark:
+                    fu.result = remark if not fu.result else fu.result + "；" + remark
+                self.db.save_follow_up(fu)
+                cnt += 1
+            QMessageBox.information(dlg, "成功", f"已批量确认 {cnt} 条跟进")
+            dlg.accept()
+
+        b_ok.clicked.connect(save)
+        b_cancel.clicked.connect(dlg.reject)
+        if dlg.exec() == QDialog.Accepted:
+            self._reload_fu_table()
+            self._reload_jobs()
+            # 重新渲染当前作业
+            self._select_job(self.current_job_id)
+
+    def _delete_fu(self, fid: int):
+        if QMessageBox.question(self, "确认", "删除这条跟进记录？") == QMessageBox.Yes:
+            self.db.delete_follow_up(fid)
+            self._reload_fu_table()
+
+    def _new_follow_up(self):
+        if not self.current_job_id:
+            return
+        job = next((j for j in self.all_jobs if j.id == self.current_job_id), None)
+        if not job:
+            return
+        dlg = FollowUpDialog(self.db, job, self)
+        if dlg.exec() == QDialog.Accepted:
+            self._reload_fu_table()
+            self._reload_jobs()
+            self._select_job(self.current_job_id)

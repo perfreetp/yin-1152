@@ -97,7 +97,9 @@ class DailyReportExporter(QObject):
             self._build_pdf(path)
             QMessageBox.information(self.parent, "导出成功", f"PDF 已保存至：\n{path}")
         except Exception as e:
-            QMessageBox.critical(self.parent, "导出失败", f"生成 PDF 出错：\n{e}")
+            import traceback
+            QMessageBox.critical(self.parent, "导出失败",
+                                 f"生成 PDF 出错：\n{e}\n\n详细：\n{traceback.format_exc()}")
 
     def export_excel(self):
         if not OPENPYXL_OK:
@@ -113,7 +115,9 @@ class DailyReportExporter(QObject):
             self._build_excel(path)
             QMessageBox.information(self.parent, "导出成功", f"Excel 已保存至：\n{path}")
         except Exception as e:
-            QMessageBox.critical(self.parent, "导出失败", f"生成 Excel 出错：\n{e}")
+            import traceback
+            QMessageBox.critical(self.parent, "导出失败",
+                                 f"生成 Excel 出错：\n{e}\n\n详细：\n{traceback.format_exc()}")
 
     # ========== 公共数据准备 ==========
     def _summary(self) -> Dict[str, List[RiskJob]]:
@@ -224,7 +228,11 @@ class DailyReportExporter(QObject):
                 continue
 
             for job in jobs_of_status:
-                story.append(self._job_card_pdf(job, body_style, small_style, cn, color))
+                try:
+                    story.append(self._job_card_pdf(job, body_style, small_style, cn, color))
+                except Exception as e:
+                    err_txt = f"[导出本条作业失败] {job.work_type} - {job.work_location}：{e}"
+                    story.append(Paragraph(err_txt, small_style))
                 story.append(Spacer(1, 2 * mm))
 
         doc.build(story)

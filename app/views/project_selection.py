@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt, QDate, Signal, QSize
 from PySide6.QtWidgets import (
     QWidget, QLabel, QComboBox, QDateEdit, QPushButton, QVBoxLayout,
     QHBoxLayout, QGroupBox, QListWidget, QListWidgetItem, QFrame, QMessageBox,
-    QToolButton, QScrollArea, QMenu, QSizePolicy
+    QToolButton, QScrollArea, QMenu, QSizePolicy, QCheckBox
 )
 
 from app.db.database import Database
@@ -237,10 +237,54 @@ class ProjectSelectionWindow(QWidget):
         box_v.setContentsMargins(6, 8, 6, 6)
         box_v.setSpacing(6)
 
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        ft = QLabel("快速筛选：")
+        ft.setStyleSheet("font-size: 11px; color: #7f8c8d; font-weight: bold;")
+        filter_row.addWidget(ft)
+
+        self.recent_airline_filter = QComboBox()
+        self.recent_airline_filter.setMinimumWidth(180)
+        self.recent_airline_filter.setStyleSheet("""
+            QComboBox { padding: 3px 8px; font-size: 11px; min-height: 24px;
+                        border: 1px solid #bdc3c7; border-radius: 4px; background: white; }
+            QComboBox QAbstractItemView { padding: 4px; }
+        """)
+        self.recent_airline_filter.currentIndexChanged.connect(self._refresh_recent_projects)
+        filter_row.addWidget(self.recent_airline_filter)
+
+        self.recent_base_filter = QComboBox()
+        self.recent_base_filter.setMinimumWidth(180)
+        self.recent_base_filter.setStyleSheet("""
+            QComboBox { padding: 3px 8px; font-size: 11px; min-height: 24px;
+                        border: 1px solid #bdc3c7; border-radius: 4px; background: white; }
+            QComboBox QAbstractItemView { padding: 4px; }
+        """)
+        self.recent_base_filter.currentIndexChanged.connect(self._refresh_recent_projects)
+        filter_row.addWidget(self.recent_base_filter)
+
+        self.recent_pinned_only = QCheckBox("只看 ⭐ 置顶")
+        self.recent_pinned_only.setStyleSheet("font-size: 11px; color: #d35400; font-weight: bold;")
+        self.recent_pinned_only.toggled.connect(self._refresh_recent_projects)
+        filter_row.addWidget(self.recent_pinned_only)
+
+        btn_clear = QPushButton("清空筛选")
+        btn_clear.setStyleSheet("""
+            QPushButton { background: #ecf0f1; color: #34495e;
+                          border: 1px solid #bdc3c7; border-radius: 4px;
+                          padding: 3px 10px; font-size: 11px; font-weight: bold; }
+            QPushButton:hover { background: #d5dbdb; }
+        """)
+        btn_clear.clicked.connect(self._clear_recent_filters)
+        filter_row.addWidget(btn_clear)
+
+        filter_row.addStretch(1)
+        box_v.addLayout(filter_row)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setMaximumHeight(78)
+        scroll.setMaximumHeight(82)
         scroll.setStyleSheet("QScrollArea { background: transparent; }")
 
         self.recent_container = QWidget()
@@ -258,6 +302,48 @@ class ProjectSelectionWindow(QWidget):
         box_v.addWidget(scroll)
 
         parent_layout.addWidget(box)
+        self._reload_recent_filter_options()
+
+    def _reload_recent_filter_options(self):
+        """从数据库获取航司/基地列表填入筛选下拉（只在项目选择页下拉变化时也同步）"""
+        a_cur = self.recent_airline_filter.currentData()
+        b_cur = self.recent_base_filter.currentData()
+        self.recent_airline_filter.blockSignals(True)
+        self.recent_base_filter.blockSignals(True)
+
+        self.recent_airline_filter.clear()
+        self.recent_airline_filter.addItem("全部航司", None)
+        for a in self.db.get_all_airlines():
+            self.recent_airline_filter.addItem(a.name, a.id)
+
+        self.recent_base_filter.clear()
+        self.recent_base_filter.addItem("全部基地", None)
+        for b in self.db.get_all_bases():
+            self.recent_base_filter.addItem(b.name, b.id)
+
+        if a_cur is not None:
+            i = self.recent_airline_filter.findData(a_cur)
+            if i >= 0:
+                self.recent_airline_filter.setCurrentIndex(i)
+        if b_cur is not None:
+            i = self.recent_base_filter.findData(b_cur)
+            if i >= 0:
+                self.recent_base_filter.setCurrentIndex(i)
+
+        self.recent_airline_filter.blockSignals(False)
+        self.recent_base_filter.blockSignals(False)
+
+    def _clear_recent_filters(self):
+        self.recent_airline_filter.blockSignals(True)
+        self.recent_base_filter.blockSignals(True)
+        self.recent_pinned_only.blockSignals(True)
+        self.recent_airline_filter.setCurrentIndex(0)
+        self.recent_base_filter.setCurrentIndex(0)
+        self.recent_pinned_only.setChecked(False)
+        self.recent_airline_filter.blockSignals(False)
+        self.recent_base_filter.blockSignals(False)
+        self.recent_pinned_only.blockSignals(False)
+        self._refresh_recent_projects()
 
     def _refresh_recent_projects(self):
         while self.recent_layout.count() > 1:
@@ -266,22 +352,51 @@ class ProjectSelectionWindow(QWidget):
             if w:
                 w.deleteLater()
 
-        recent_list = self.db.get_recent_projects(limit=12)
-        if not recent_list:
+        recent_list = self.db.get_recent_projects(limit=20)
+
+        sel_airline = None
+        sel_base = None
+        pinned_only = False
+        if hasattr(self, "recent_airline_filter"):
+            sel_airline = self.recent_airline_filter.currentData()
+            sel_base = self.recent_base_filter.currentData()
+            pinned_only = self.recent_pinned_only.isChecked()
+
+        all_projects = {p.id: p for p in self.db.get_projects()}
+
+        shown = []
+        pinned_items = []
+        normal_items = []
+        for rp in recent_list:
+            project = all_projects.get(rp.project_id)
+            if not project:
+                continue
+            if sel_airline and project.airline_id != sel_airline:
+                continue
+            if sel_base and project.base_id != sel_base:
+                continue
+            pinned = self.db.is_project_pinned(rp.project_id)
+            if pinned_only and not pinned:
+                continue
+            entry = (rp, project, pinned)
+            if pinned:
+                pinned_items.append(entry)
+            else:
+                normal_items.append(entry)
+        shown = pinned_items + normal_items
+
+        if not shown:
+            if pinned_only or sel_airline or sel_base:
+                self.lbl_recent_empty.setText("当前筛选条件下无项目，点击「清空筛选」查看全部")
+            else:
+                self.lbl_recent_empty.setText("暂无记录——查看任意项目后会自动出现在这里。右键卡片可置顶为常用项目。")
             self.lbl_recent_empty.show()
             self.recent_layout.insertWidget(0, self.lbl_recent_empty)
             return
         self.lbl_recent_empty.hide()
 
-        all_projects = {p.id: p for p in self.db.get_projects()}
-
-        for rp in recent_list:
-            project = all_projects.get(rp.project_id)
-            if not project:
-                continue
-
+        for rp, project, pinned in shown:
             card = QFrame()
-            pinned = self.db.is_project_pinned(rp.project_id)
             border_color = "#f1c40f" if pinned else "#bdc3c7"
             bg_color = "#fef9e7" if pinned else "white"
             star = "⭐ " if pinned else ""
